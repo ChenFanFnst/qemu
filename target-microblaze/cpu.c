@@ -4,6 +4,7 @@
  * Copyright (c) 2009 Edgar E. Iglesias
  * Copyright (c) 2009-2012 PetaLogix Qld Pty Ltd.
  * Copyright (c) 2012 SUSE LINUX Products GmbH
+ * Copyright (c) 2009 Edgar E. Iglesias, Axis Communications AB.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -32,6 +33,21 @@ static void mb_cpu_set_pc(CPUState *cs, vaddr value)
 
     cpu->env.sregs[SR_PC] = value;
 }
+
+#ifndef CONFIG_USER_ONLY
+static void microblaze_cpu_set_irq(void *opaque, int irq, int level)
+{
+    MicroBlazeCPU *cpu = opaque;
+    CPUState *cs = CPU(cpu);
+    int type = irq ? CPU_INTERRUPT_NMI : CPU_INTERRUPT_HARD;
+
+    if (level) {
+        cpu_interrupt(cs, type);
+    } else {
+        cpu_reset_interrupt(cs, type);
+    }
+}
+#endif
 
 /* CPUClass::reset() */
 static void mb_cpu_reset(CPUState *s)
@@ -90,10 +106,11 @@ static void mb_cpu_reset(CPUState *s)
 
 static void mb_cpu_realizefn(DeviceState *dev, Error **errp)
 {
-    MicroBlazeCPU *cpu = MICROBLAZE_CPU(dev);
+    CPUState *cs = CPU(dev);
     MicroBlazeCPUClass *mcc = MICROBLAZE_CPU_GET_CLASS(dev);
 
-    cpu_reset(CPU(cpu));
+    cpu_reset(cs);
+    qemu_init_vcpu(cs);
 
     mcc->parent_realize(dev, errp);
 }
@@ -109,6 +126,11 @@ static void mb_cpu_initfn(Object *obj)
     cpu_exec_init(env);
 
     set_float_rounding_mode(float_round_nearest_even, &env->fp_status);
+
+#ifndef CONFIG_USER_ONLY
+    /* Inbound IRQ and FIR lines */
+    qdev_init_gpio_in(DEVICE(cpu), microblaze_cpu_set_irq, 2);
+#endif
 
     if (tcg_enabled() && !tcg_initialized) {
         tcg_initialized = true;
@@ -141,12 +163,15 @@ static void mb_cpu_class_init(ObjectClass *oc, void *data)
     cc->do_interrupt = mb_cpu_do_interrupt;
     cc->dump_state = mb_cpu_dump_state;
     cc->set_pc = mb_cpu_set_pc;
+    cc->gdb_read_register = mb_cpu_gdb_read_register;
+    cc->gdb_write_register = mb_cpu_gdb_write_register;
 #ifndef CONFIG_USER_ONLY
     cc->do_unassigned_access = mb_cpu_unassigned_access;
     cc->get_phys_page_debug = mb_cpu_get_phys_page_debug;
 #endif
     dc->vmsd = &vmstate_mb_cpu;
     dc->props = mb_properties;
+    cc->gdb_num_core_regs = 32 + 5;
 }
 
 static const TypeInfo mb_cpu_type_info = {

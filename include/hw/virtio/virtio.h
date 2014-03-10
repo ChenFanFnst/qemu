@@ -124,9 +124,13 @@ struct VirtIODevice
 };
 
 typedef struct VirtioDeviceClass {
-    /* This is what a VirtioDevice must implement */
+    /*< private >*/
     DeviceClass parent;
-    int (*init)(VirtIODevice *vdev);
+    /*< public >*/
+
+    /* This is what a VirtioDevice must implement */
+    DeviceRealize realize;
+    DeviceUnrealize unrealize;
     uint32_t (*get_features)(VirtIODevice *vdev, uint32_t requested_features);
     uint32_t (*bad_features)(VirtIODevice *vdev);
     void (*set_features)(VirtIODevice *vdev, uint32_t val);
@@ -237,6 +241,7 @@ hwaddr virtio_queue_get_used_size(VirtIODevice *vdev, int n);
 hwaddr virtio_queue_get_ring_size(VirtIODevice *vdev, int n);
 uint16_t virtio_queue_get_last_avail_idx(VirtIODevice *vdev, int n);
 void virtio_queue_set_last_avail_idx(VirtIODevice *vdev, int n, uint16_t idx);
+void virtio_queue_invalidate_signalled_used(VirtIODevice *vdev, int n);
 VirtQueue *virtio_get_queue(VirtIODevice *vdev, int n);
 uint16_t virtio_get_queue_index(VirtQueue *vq);
 int virtio_queue_get_id(VirtQueue *vq);

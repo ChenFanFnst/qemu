@@ -96,12 +96,16 @@ typedef struct PageDesc {
 # define L1_MAP_ADDR_SPACE_BITS  TARGET_VIRT_ADDR_SPACE_BITS
 #endif
 
+/* Size of the L2 (and L3, etc) page tables.  */
+#define V_L2_BITS 10
+#define V_L2_SIZE (1 << V_L2_BITS)
+
 /* The bits remaining after N lower levels of page tables.  */
 #define V_L1_BITS_REM \
-    ((L1_MAP_ADDR_SPACE_BITS - TARGET_PAGE_BITS) % L2_BITS)
+    ((L1_MAP_ADDR_SPACE_BITS - TARGET_PAGE_BITS) % V_L2_BITS)
 
 #if V_L1_BITS_REM < 4
-#define V_L1_BITS  (V_L1_BITS_REM + L2_BITS)
+#define V_L1_BITS  (V_L1_BITS_REM + V_L2_BITS)
 #else
 #define V_L1_BITS  V_L1_BITS_REM
 #endif
@@ -285,17 +289,15 @@ static inline void map_exec(void *addr, long size)
 }
 #endif
 
-static void page_init(void)
+void page_size_init(void)
 {
     /* NOTE: we can always suppose that qemu_host_page_size >=
        TARGET_PAGE_SIZE */
 #ifdef _WIN32
-    {
-        SYSTEM_INFO system_info;
+    SYSTEM_INFO system_info;
 
-        GetSystemInfo(&system_info);
-        qemu_real_host_page_size = system_info.dwPageSize;
-    }
+    GetSystemInfo(&system_info);
+    qemu_real_host_page_size = system_info.dwPageSize;
 #else
     qemu_real_host_page_size = getpagesize();
 #endif
@@ -306,7 +308,11 @@ static void page_init(void)
         qemu_host_page_size = TARGET_PAGE_SIZE;
     }
     qemu_host_page_mask = ~(qemu_host_page_size - 1);
+}
 
+static void page_init(void)
+{
+    page_size_init();
 #if defined(CONFIG_BSD) && defined(CONFIG_USER_ONLY)
     {
 #ifdef HAVE_KINFO_GETVMMAP
@@ -395,18 +401,18 @@ static PageDesc *page_find_alloc(tb_page_addr_t index, int alloc)
     lp = l1_map + ((index >> V_L1_SHIFT) & (V_L1_SIZE - 1));
 
     /* Level 2..N-1.  */
-    for (i = V_L1_SHIFT / L2_BITS - 1; i > 0; i--) {
+    for (i = V_L1_SHIFT / V_L2_BITS - 1; i > 0; i--) {
         void **p = *lp;
 
         if (p == NULL) {
             if (!alloc) {
                 return NULL;
             }
-            ALLOC(p, sizeof(void *) * L2_SIZE);
+            ALLOC(p, sizeof(void *) * V_L2_SIZE);
             *lp = p;
         }
 
-        lp = p + ((index >> (i * L2_BITS)) & (L2_SIZE - 1));
+        lp = p + ((index >> (i * V_L2_BITS)) & (V_L2_SIZE - 1));
     }
 
     pd = *lp;
@@ -414,13 +420,13 @@ static PageDesc *page_find_alloc(tb_page_addr_t index, int alloc)
         if (!alloc) {
             return NULL;
         }
-        ALLOC(pd, sizeof(PageDesc) * L2_SIZE);
+        ALLOC(pd, sizeof(PageDesc) * V_L2_SIZE);
         *lp = pd;
     }
 
 #undef ALLOC
 
-    return pd + (index & (L2_SIZE - 1));
+    return pd + (index & (V_L2_SIZE - 1));
 }
 
 static inline PageDesc *page_find(tb_page_addr_t index)
@@ -655,14 +661,14 @@ static void page_flush_tb_1(int level, void **lp)
     if (level == 0) {
         PageDesc *pd = *lp;
 
-        for (i = 0; i < L2_SIZE; ++i) {
+        for (i = 0; i < V_L2_SIZE; ++i) {
             pd[i].first_tb = NULL;
             invalidate_page_bitmap(pd + i);
         }
     } else {
         void **pp = *lp;
 
-        for (i = 0; i < L2_SIZE; ++i) {
+        for (i = 0; i < V_L2_SIZE; ++i) {
             page_flush_tb_1(level - 1, pp + i);
         }
     }
@@ -673,7 +679,7 @@ static void page_flush_tb(void)
     int i;
 
     for (i = 0; i < V_L1_SIZE; i++) {
-        page_flush_tb_1(V_L1_SHIFT / L2_BITS - 1, l1_map + i);
+        page_flush_tb_1(V_L1_SHIFT / V_L2_BITS - 1, l1_map + i);
     }
 }
 
@@ -696,14 +702,13 @@ void tb_flush(CPUArchState *env1)
     }
     tcg_ctx.tb_ctx.nb_tbs = 0;
 
-    for (cpu = first_cpu; cpu != NULL; cpu = cpu->next_cpu) {
+    CPU_FOREACH(cpu) {
         CPUArchState *env = cpu->env_ptr;
 
-        memset(env->tb_jmp_cache, 0, TB_JMP_CACHE_SIZE * sizeof(void *));
+        memset(env->tb_jmp_cache, 0, sizeof(env->tb_jmp_cache));
     }
 
-    memset(tcg_ctx.tb_ctx.tb_phys_hash, 0,
-            CODE_GEN_PHYS_HASH_SIZE * sizeof(void *));
+    memset(tcg_ctx.tb_ctx.tb_phys_hash, 0, sizeof(tcg_ctx.tb_ctx.tb_phys_hash));
     page_flush_tb();
 
     tcg_ctx.code_gen_ptr = tcg_ctx.code_gen_buffer;
@@ -850,7 +855,7 @@ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
 
     /* remove the TB from the hash list */
     h = tb_jmp_cache_hash_func(tb->pc);
-    for (cpu = first_cpu; cpu != NULL; cpu = cpu->next_cpu) {
+    CPU_FOREACH(cpu) {
         CPUArchState *env = cpu->env_ptr;
 
         if (env->tb_jmp_cache[h] == tb) {
@@ -1148,7 +1153,8 @@ void tb_invalidate_phys_page_fast(tb_page_addr_t start, int len)
 
 #if !defined(CONFIG_SOFTMMU)
 static void tb_invalidate_phys_page(tb_page_addr_t addr,
-                                    uintptr_t pc, void *puc)
+                                    uintptr_t pc, void *puc,
+                                    bool locked)
 {
     TranslationBlock *tb;
     PageDesc *p;
@@ -1206,6 +1212,9 @@ static void tb_invalidate_phys_page(tb_page_addr_t addr,
            itself */
         cpu->current_tb = NULL;
         tb_gen_code(env, current_pc, current_cs_base, current_flags, 1);
+        if (locked) {
+            mmap_unlock();
+        }
         cpu_resume_from_signal(env, puc);
     }
 #endif
@@ -1314,18 +1323,6 @@ static void tb_link_page(TranslationBlock *tb, tb_page_addr_t phys_pc,
     mmap_unlock();
 }
 
-#if defined(CONFIG_QEMU_LDST_OPTIMIZATION) && defined(CONFIG_SOFTMMU)
-/* check whether the given addr is in TCG generated code buffer or not */
-bool is_tcg_gen_code(uintptr_t tc_ptr)
-{
-    /* This can be called during code generation, code_gen_buffer_size
-       is used instead of code_gen_ptr for upper boundary checking */
-    return (tc_ptr >= (uintptr_t)tcg_ctx.code_gen_buffer &&
-            tc_ptr < (uintptr_t)(tcg_ctx.code_gen_buffer +
-                    tcg_ctx.code_gen_buffer_size));
-}
-#endif
-
 /* find the TB 'tb' such that tb[0].tc_ptr <= tc_ptr <
    tb[1].tc_ptr. Return NULL if not found */
 static TranslationBlock *tb_find_pc(uintptr_t tc_ptr)
@@ -1360,13 +1357,13 @@ static TranslationBlock *tb_find_pc(uintptr_t tc_ptr)
 }
 
 #if defined(TARGET_HAS_ICE) && !defined(CONFIG_USER_ONLY)
-void tb_invalidate_phys_addr(hwaddr addr)
+void tb_invalidate_phys_addr(AddressSpace *as, hwaddr addr)
 {
     ram_addr_t ram_addr;
     MemoryRegion *mr;
     hwaddr l = 1;
 
-    mr = address_space_translate(&address_space_memory, addr, &addr, &l, false);
+    mr = address_space_translate(as, addr, &addr, &l, false);
     if (!(memory_region_is_ram(mr)
           || memory_region_is_romd(mr))) {
         return;
@@ -1608,7 +1605,7 @@ static int walk_memory_regions_1(struct walk_memory_regions_data *data,
     if (level == 0) {
         PageDesc *pd = *lp;
 
-        for (i = 0; i < L2_SIZE; ++i) {
+        for (i = 0; i < V_L2_SIZE; ++i) {
             int prot = pd[i].flags;
 
             pa = base | (i << TARGET_PAGE_BITS);
@@ -1622,9 +1619,9 @@ static int walk_memory_regions_1(struct walk_memory_regions_data *data,
     } else {
         void **pp = *lp;
 
-        for (i = 0; i < L2_SIZE; ++i) {
+        for (i = 0; i < V_L2_SIZE; ++i) {
             pa = base | ((abi_ulong)i <<
-                (TARGET_PAGE_BITS + L2_BITS * level));
+                (TARGET_PAGE_BITS + V_L2_BITS * level));
             rc = walk_memory_regions_1(data, pa, level - 1, pp + i);
             if (rc != 0) {
                 return rc;
@@ -1647,7 +1644,7 @@ int walk_memory_regions(void *priv, walk_memory_regions_fn fn)
 
     for (i = 0; i < V_L1_SIZE; i++) {
         int rc = walk_memory_regions_1(&data, (abi_ulong)i << V_L1_SHIFT,
-                                       V_L1_SHIFT / L2_BITS - 1, l1_map + i);
+                                       V_L1_SHIFT / V_L2_BITS - 1, l1_map + i);
 
         if (rc != 0) {
             return rc;
@@ -1675,8 +1672,9 @@ static int dump_region(void *priv, abi_ulong start,
 /* dump memory mappings */
 void page_dump(FILE *f)
 {
-    (void) fprintf(f, "%-8s %-8s %-8s %s\n",
-            "start", "end", "size", "prot");
+    const int length = sizeof(abi_ulong) * 2;
+    (void) fprintf(f, "%-*s %-*s %-*s %s\n",
+            length, "start", length, "end", length, "size", "prot");
     walk_memory_regions(f, dump_region);
 }
 
@@ -1723,7 +1721,7 @@ void page_set_flags(target_ulong start, target_ulong end, int flags)
         if (!(p->flags & PAGE_WRITE) &&
             (flags & PAGE_WRITE) &&
             p->first_tb) {
-            tb_invalidate_phys_page(addr, 0, NULL);
+            tb_invalidate_phys_page(addr, 0, NULL, false);
         }
         p->flags = flags;
     }
@@ -1818,7 +1816,7 @@ int page_unprotect(target_ulong address, uintptr_t pc, void *puc)
 
             /* and since the content will be modified, we must invalidate
                the corresponding translated code. */
-            tb_invalidate_phys_page(addr, pc, puc);
+            tb_invalidate_phys_page(addr, pc, puc, true);
 #ifdef DEBUG_TB_CHECK
             tb_invalidate_check(addr);
 #endif

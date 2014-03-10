@@ -19,6 +19,10 @@
 #include "qemu-common.h"
 #include "block/block.h"
 #include "block/nbd.h"
+#include "qemu/main-loop.h"
+#include "qemu/sockets.h"
+#include "qemu/error-report.h"
+#include "block/snapshot.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -77,8 +81,16 @@ static void usage(const char *name)
 #endif
 "\n"
 "Block device options:\n"
+"  -f, --format=FORMAT  set image format (raw, qcow2, ...)\n"
 "  -r, --read-only      export read-only\n"
-"  -s, --snapshot       use snapshot file\n"
+"  -s, --snapshot       use FILE as an external snapshot, create a temporary\n"
+"                       file with backing_file=FILE, redirect the write to\n"
+"                       the temporary one\n"
+"  -l, --load-snapshot=SNAPSHOT_PARAM\n"
+"                       load an internal snapshot inside FILE and export it\n"
+"                       as an read-only device, SNAPSHOT_PARAM format is\n"
+"                       'snapshot.id=[ID],snapshot.name=[NAME]', or\n"
+"                       '[ID_OR_NAME]'\n"
 "  -n, --nocache        disable host cache\n"
 "      --cache=MODE     set cache mode (none, writeback, ...)\n"
 #ifdef CONFIG_LINUX_AIO
@@ -189,6 +201,56 @@ static void termsig_handler(int signum)
 {
     state = TERMINATE;
     qemu_notify_event();
+}
+
+static void combine_addr(char *buf, size_t len, const char* address,
+                         uint16_t port)
+{
+    /* If the address-part contains a colon, it's an IPv6 IP so needs [] */
+    if (strstr(address, ":")) {
+        snprintf(buf, len, "[%s]:%u", address, port);
+    } else {
+        snprintf(buf, len, "%s:%u", address, port);
+    }
+}
+
+static int tcp_socket_incoming(const char *address, uint16_t port)
+{
+    char address_and_port[128];
+    Error *local_err = NULL;
+
+    combine_addr(address_and_port, 128, address, port);
+    int fd = inet_listen(address_and_port, NULL, 0, SOCK_STREAM, 0, &local_err);
+
+    if (local_err != NULL) {
+        qerror_report_err(local_err);
+        error_free(local_err);
+    }
+    return fd;
+}
+
+static int unix_socket_incoming(const char *path)
+{
+    Error *local_err = NULL;
+    int fd = unix_listen(path, NULL, 0, &local_err);
+
+    if (local_err != NULL) {
+        qerror_report_err(local_err);
+        error_free(local_err);
+    }
+    return fd;
+}
+
+static int unix_socket_outgoing(const char *path)
+{
+    Error *local_err = NULL;
+    int fd = unix_connect(path, &local_err);
+
+    if (local_err != NULL) {
+        qerror_report_err(local_err);
+        error_free(local_err);
+    }
+    return fd;
 }
 
 static void *show_parts(void *arg)
@@ -314,7 +376,9 @@ int main(int argc, char **argv)
     char *device = NULL;
     int port = NBD_DEFAULT_PORT;
     off_t fd_size;
-    const char *sopt = "hVb:o:p:rsnP:c:dvk:e:f:t";
+    QemuOpts *sn_opts = NULL;
+    const char *sn_id_or_name = NULL;
+    const char *sopt = "hVb:o:p:rsnP:c:dvk:e:f:tl:";
     struct option lopt[] = {
         { "help", 0, NULL, 'h' },
         { "version", 0, NULL, 'V' },
@@ -327,6 +391,7 @@ int main(int argc, char **argv)
         { "connect", 1, NULL, 'c' },
         { "disconnect", 0, NULL, 'd' },
         { "snapshot", 0, NULL, 's' },
+        { "load-snapshot", 1, NULL, 'l' },
         { "nocache", 0, NULL, 'n' },
         { "cache", 1, NULL, QEMU_NBD_OPT_CACHE },
 #ifdef CONFIG_LINUX_AIO
@@ -354,6 +419,7 @@ int main(int argc, char **argv)
 #endif
     pthread_t client_thread;
     const char *fmt = NULL;
+    Error *local_err = NULL;
 
     /* The client thread uses SIGTERM to interrupt the server.  A signal
      * handler ensures that "qemu-nbd -v -c" exits with a nice status code.
@@ -362,6 +428,7 @@ int main(int argc, char **argv)
     memset(&sa_sigterm, 0, sizeof(sa_sigterm));
     sa_sigterm.sa_handler = termsig_handler;
     sigaction(SIGTERM, &sa_sigterm, NULL);
+    qemu_init_exec_dir(argv[0]);
 
     while ((ch = getopt_long(argc, argv, sopt, lopt, &opt_ind)) != -1) {
         switch (ch) {
@@ -426,6 +493,17 @@ int main(int argc, char **argv)
                 errx(EXIT_FAILURE, "Offset must be positive `%s'", optarg);
             }
             break;
+        case 'l':
+            if (strstart(optarg, SNAPSHOT_OPT_BASE, NULL)) {
+                sn_opts = qemu_opts_parse(&internal_snapshot_opts, optarg, 0);
+                if (!sn_opts) {
+                    errx(EXIT_FAILURE, "Failed in parsing snapshot param `%s'",
+                         optarg);
+                }
+            } else {
+                sn_id_or_name = optarg;
+            }
+            /* fall through */
         case 'r':
             nbdflags |= NBD_FLAG_READ_ONLY;
             flags &= ~BDRV_O_RDWR;
@@ -572,10 +650,27 @@ int main(int argc, char **argv)
 
     bs = bdrv_new("hda");
     srcpath = argv[optind];
-    ret = bdrv_open(bs, srcpath, NULL, flags, drv);
+    ret = bdrv_open(&bs, srcpath, NULL, NULL, flags, drv, &local_err);
     if (ret < 0) {
         errno = -ret;
-        err(EXIT_FAILURE, "Failed to bdrv_open '%s'", argv[optind]);
+        err(EXIT_FAILURE, "Failed to bdrv_open '%s': %s", argv[optind],
+            error_get_pretty(local_err));
+    }
+
+    if (sn_opts) {
+        ret = bdrv_snapshot_load_tmp(bs,
+                                     qemu_opt_get(sn_opts, SNAPSHOT_OPT_ID),
+                                     qemu_opt_get(sn_opts, SNAPSHOT_OPT_NAME),
+                                     &local_err);
+    } else if (sn_id_or_name) {
+        ret = bdrv_snapshot_load_tmp_by_id_or_name(bs, sn_id_or_name,
+                                                   &local_err);
+    }
+    if (ret < 0) {
+        errno = -ret;
+        err(EXIT_FAILURE,
+            "Failed to load snapshot: %s",
+            error_get_pretty(local_err));
     }
 
     fd_size = bdrv_getlength(bs);
@@ -636,6 +731,10 @@ int main(int argc, char **argv)
     bdrv_close(bs);
     if (sockpath) {
         unlink(sockpath);
+    }
+
+    if (sn_opts) {
+        qemu_opts_del(sn_opts);
     }
 
     if (device) {

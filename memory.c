@@ -18,10 +18,11 @@
 #include "exec/ioport.h"
 #include "qemu/bitops.h"
 #include "qom/object.h"
-#include "sysemu/kvm.h"
+#include "trace.h"
 #include <assert.h>
 
 #include "exec/memory-internal.h"
+#include "exec/ram_addr.h"
 
 //#define DEBUG_UNASSIGNED
 
@@ -339,65 +340,104 @@ static void flatview_simplify(FlatView *view)
     }
 }
 
-static void memory_region_oldmmio_read_accessor(void *opaque,
+static bool memory_region_big_endian(MemoryRegion *mr)
+{
+#ifdef TARGET_WORDS_BIGENDIAN
+    return mr->ops->endianness != DEVICE_LITTLE_ENDIAN;
+#else
+    return mr->ops->endianness == DEVICE_BIG_ENDIAN;
+#endif
+}
+
+static bool memory_region_wrong_endianness(MemoryRegion *mr)
+{
+#ifdef TARGET_WORDS_BIGENDIAN
+    return mr->ops->endianness == DEVICE_LITTLE_ENDIAN;
+#else
+    return mr->ops->endianness == DEVICE_BIG_ENDIAN;
+#endif
+}
+
+static void adjust_endianness(MemoryRegion *mr, uint64_t *data, unsigned size)
+{
+    if (memory_region_wrong_endianness(mr)) {
+        switch (size) {
+        case 1:
+            break;
+        case 2:
+            *data = bswap16(*data);
+            break;
+        case 4:
+            *data = bswap32(*data);
+            break;
+        case 8:
+            *data = bswap64(*data);
+            break;
+        default:
+            abort();
+        }
+    }
+}
+
+static void memory_region_oldmmio_read_accessor(MemoryRegion *mr,
                                                 hwaddr addr,
                                                 uint64_t *value,
                                                 unsigned size,
                                                 unsigned shift,
                                                 uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     tmp = mr->ops->old_mmio.read[ctz32(size)](mr->opaque, addr);
+    trace_memory_region_ops_read(mr, addr, tmp, size);
     *value |= (tmp & mask) << shift;
 }
 
-static void memory_region_read_accessor(void *opaque,
+static void memory_region_read_accessor(MemoryRegion *mr,
                                         hwaddr addr,
                                         uint64_t *value,
                                         unsigned size,
                                         unsigned shift,
                                         uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     if (mr->flush_coalesced_mmio) {
         qemu_flush_coalesced_mmio_buffer();
     }
     tmp = mr->ops->read(mr->opaque, addr, size);
+    trace_memory_region_ops_read(mr, addr, tmp, size);
     *value |= (tmp & mask) << shift;
 }
 
-static void memory_region_oldmmio_write_accessor(void *opaque,
+static void memory_region_oldmmio_write_accessor(MemoryRegion *mr,
                                                  hwaddr addr,
                                                  uint64_t *value,
                                                  unsigned size,
                                                  unsigned shift,
                                                  uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     tmp = (*value >> shift) & mask;
+    trace_memory_region_ops_write(mr, addr, tmp, size);
     mr->ops->old_mmio.write[ctz32(size)](mr->opaque, addr, tmp);
 }
 
-static void memory_region_write_accessor(void *opaque,
+static void memory_region_write_accessor(MemoryRegion *mr,
                                          hwaddr addr,
                                          uint64_t *value,
                                          unsigned size,
                                          unsigned shift,
                                          uint64_t mask)
 {
-    MemoryRegion *mr = opaque;
     uint64_t tmp;
 
     if (mr->flush_coalesced_mmio) {
         qemu_flush_coalesced_mmio_buffer();
     }
     tmp = (*value >> shift) & mask;
+    trace_memory_region_ops_write(mr, addr, tmp, size);
     mr->ops->write(mr->opaque, addr, tmp, size);
 }
 
@@ -406,13 +446,13 @@ static void access_with_adjusted_size(hwaddr addr,
                                       unsigned size,
                                       unsigned access_size_min,
                                       unsigned access_size_max,
-                                      void (*access)(void *opaque,
+                                      void (*access)(MemoryRegion *mr,
                                                      hwaddr addr,
                                                      uint64_t *value,
                                                      unsigned size,
                                                      unsigned shift,
                                                      uint64_t mask),
-                                      void *opaque)
+                                      MemoryRegion *mr)
 {
     uint64_t access_mask;
     unsigned access_size;
@@ -428,13 +468,15 @@ static void access_with_adjusted_size(hwaddr addr,
     /* FIXME: support unaligned access? */
     access_size = MAX(MIN(size, access_size_max), access_size_min);
     access_mask = -1ULL >> (64 - access_size * 8);
-    for (i = 0; i < size; i += access_size) {
-#ifdef TARGET_WORDS_BIGENDIAN
-        access(opaque, addr + i, value, access_size,
-               (size - access_size - i) * 8, access_mask);
-#else
-        access(opaque, addr + i, value, access_size, i * 8, access_mask);
-#endif
+    if (memory_region_big_endian(mr)) {
+        for (i = 0; i < size; i += access_size) {
+            access(mr, addr + i, value, access_size,
+                   (size - access_size - i) * 8, access_mask);
+        }
+    } else {
+        for (i = 0; i < size; i += access_size) {
+            access(mr, addr + i, value, access_size, i * 8, access_mask);
+        }
     }
 }
 
@@ -786,15 +828,6 @@ static void memory_region_destructor_rom_device(MemoryRegion *mr)
     qemu_ram_free(mr->ram_addr & TARGET_PAGE_MASK);
 }
 
-static bool memory_region_wrong_endianness(MemoryRegion *mr)
-{
-#ifdef TARGET_WORDS_BIGENDIAN
-    return mr->ops->endianness == DEVICE_LITTLE_ENDIAN;
-#else
-    return mr->ops->endianness == DEVICE_BIG_ENDIAN;
-#endif
-}
-
 void memory_region_init(MemoryRegion *mr,
                         Object *owner,
                         const char *name,
@@ -840,7 +873,7 @@ static uint64_t unassigned_mem_read(void *opaque, hwaddr addr,
     if (current_cpu != NULL) {
         cpu_unassigned_access(current_cpu, addr, false, false, 0, size);
     }
-    return -1ULL;
+    return 0;
 }
 
 static void unassigned_mem_write(void *opaque, hwaddr addr,
@@ -919,27 +952,6 @@ static uint64_t memory_region_dispatch_read1(MemoryRegion *mr,
     }
 
     return data;
-}
-
-static void adjust_endianness(MemoryRegion *mr, uint64_t *data, unsigned size)
-{
-    if (memory_region_wrong_endianness(mr)) {
-        switch (size) {
-        case 1:
-            break;
-        case 2:
-            *data = bswap16(*data);
-            break;
-        case 4:
-            *data = bswap32(*data);
-            break;
-        case 8:
-            *data = bswap64(*data);
-            break;
-        default:
-            abort();
-        }
-    }
 }
 
 static bool memory_region_dispatch_read(MemoryRegion *mr,
@@ -1163,15 +1175,14 @@ bool memory_region_get_dirty(MemoryRegion *mr, hwaddr addr,
                              hwaddr size, unsigned client)
 {
     assert(mr->terminates);
-    return cpu_physical_memory_get_dirty(mr->ram_addr + addr, size,
-                                         1 << client);
+    return cpu_physical_memory_get_dirty(mr->ram_addr + addr, size, client);
 }
 
 void memory_region_set_dirty(MemoryRegion *mr, hwaddr addr,
                              hwaddr size)
 {
     assert(mr->terminates);
-    return cpu_physical_memory_set_dirty_range(mr->ram_addr + addr, size, -1);
+    cpu_physical_memory_set_dirty_range(mr->ram_addr + addr, size);
 }
 
 bool memory_region_test_and_clear_dirty(MemoryRegion *mr, hwaddr addr,
@@ -1179,12 +1190,9 @@ bool memory_region_test_and_clear_dirty(MemoryRegion *mr, hwaddr addr,
 {
     bool ret;
     assert(mr->terminates);
-    ret = cpu_physical_memory_get_dirty(mr->ram_addr + addr, size,
-                                        1 << client);
+    ret = cpu_physical_memory_get_dirty(mr->ram_addr + addr, size, client);
     if (ret) {
-        cpu_physical_memory_reset_dirty(mr->ram_addr + addr,
-                                        mr->ram_addr + addr + size,
-                                        1 << client);
+        cpu_physical_memory_reset_dirty(mr->ram_addr + addr, size, client);
     }
     return ret;
 }
@@ -1230,9 +1238,7 @@ void memory_region_reset_dirty(MemoryRegion *mr, hwaddr addr,
                                hwaddr size, unsigned client)
 {
     assert(mr->terminates);
-    cpu_physical_memory_reset_dirty(mr->ram_addr + addr,
-                                    mr->ram_addr + addr + size,
-                                    1 << client);
+    cpu_physical_memory_reset_dirty(mr->ram_addr + addr, size, client);
 }
 
 void *memory_region_get_ram_ptr(MemoryRegion *mr)
@@ -1462,7 +1468,7 @@ void memory_region_add_subregion(MemoryRegion *mr,
 void memory_region_add_subregion_overlap(MemoryRegion *mr,
                                          hwaddr offset,
                                          MemoryRegion *subregion,
-                                         unsigned priority)
+                                         int priority)
 {
     subregion->may_overlap = true;
     subregion->priority = priority;
@@ -1495,7 +1501,7 @@ void memory_region_set_enabled(MemoryRegion *mr, bool enabled)
 void memory_region_set_address(MemoryRegion *mr, hwaddr addr)
 {
     MemoryRegion *parent = mr->parent;
-    unsigned priority = mr->priority;
+    int priority = mr->priority;
     bool may_overlap = mr->may_overlap;
 
     if (addr == mr->addr || !parent) {
@@ -1585,6 +1591,7 @@ MemoryRegionSection memory_region_find(MemoryRegion *mr,
     view = address_space_get_flatview(as);
     fr = flatview_lookup(view, range);
     if (!fr) {
+        flatview_unref(view);
         return ret;
     }
 
@@ -1798,7 +1805,9 @@ static void mtree_print_mr(fprintf_function mon_printf, void *f,
                    mr->alias->name,
                    mr->alias_offset,
                    mr->alias_offset
-                   + (hwaddr)int128_get64(mr->size) - 1);
+                   + (int128_nz(mr->size) ?
+                      (hwaddr)int128_get64(int128_sub(mr->size,
+                                                      int128_one())) : 0));
     } else {
         mon_printf(f,
                    TARGET_FMT_plx "-" TARGET_FMT_plx " (prio %d, %c%c): %s\n",

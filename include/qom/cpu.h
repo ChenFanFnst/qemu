@@ -23,11 +23,13 @@
 #include <signal.h>
 #include "hw/qdev-core.h"
 #include "exec/hwaddr.h"
+#include "qemu/queue.h"
 #include "qemu/thread.h"
 #include "qemu/tls.h"
 #include "qemu/typedefs.h"
 
-typedef int (*WriteCoreDumpFunction)(void *buf, size_t size, void *opaque);
+typedef int (*WriteCoreDumpFunction)(const void *buf, size_t size,
+                                     void *opaque);
 
 /**
  * vaddr:
@@ -80,7 +82,11 @@ struct TranslationBlock;
  * @synchronize_from_tb: Callback for synchronizing state from a TCG
  * #TranslationBlock.
  * @get_phys_page_debug: Callback for obtaining a physical address.
+ * @gdb_read_register: Callback for letting GDB read a register.
+ * @gdb_write_register: Callback for letting GDB write a register.
  * @vmsd: State description for migration.
+ * @gdb_num_core_regs: Number of core registers accessible to GDB.
+ * @gdb_core_xml_file: File name for core registers GDB XML description.
  *
  * Represents a CPU family or model.
  */
@@ -108,8 +114,9 @@ typedef struct CPUClass {
     void (*set_pc)(CPUState *cpu, vaddr value);
     void (*synchronize_from_tb)(CPUState *cpu, struct TranslationBlock *tb);
     hwaddr (*get_phys_page_debug)(CPUState *cpu, vaddr addr);
+    int (*gdb_read_register)(CPUState *cpu, uint8_t *buf, int reg);
+    int (*gdb_write_register)(CPUState *cpu, uint8_t *buf, int reg);
 
-    const struct VMStateDescription *vmsd;
     int (*write_elf64_note)(WriteCoreDumpFunction f, CPUState *cpu,
                             int cpuid, void *opaque);
     int (*write_elf64_qemunote)(WriteCoreDumpFunction f, CPUState *cpu,
@@ -118,6 +125,10 @@ typedef struct CPUClass {
                             int cpuid, void *opaque);
     int (*write_elf32_qemunote)(WriteCoreDumpFunction f, CPUState *cpu,
                                 void *opaque);
+
+    const struct VMStateDescription *vmsd;
+    int gdb_num_core_regs;
+    const char *gdb_core_xml_file;
 } CPUClass;
 
 struct KVMState;
@@ -142,6 +153,8 @@ struct kvm_run;
  * @env_ptr: Pointer to subclass-specific CPUArchState field.
  * @current_tb: Currently executing TB.
  * @gdb_regs: Additional GDB registers.
+ * @gdb_num_regs: Number of total registers accessible to GDB.
+ * @gdb_num_g_regs: Number of registers in GDB 'g' packets.
  * @next_cpu: Next CPU sharing TB cache.
  * @kvm_fd: vCPU file descriptor for KVM.
  *
@@ -174,10 +187,15 @@ struct CPUState {
     uint32_t interrupt_request;
     int singlestep_enabled;
 
+    AddressSpace *as;
+    MemoryListener *tcg_as_listener;
+
     void *env_ptr; /* CPUArchState */
     struct TranslationBlock *current_tb;
     struct GDBRegisterState *gdb_regs;
-    CPUState *next_cpu;
+    int gdb_num_regs;
+    int gdb_num_g_regs;
+    QTAILQ_ENTRY(CPUState) node;
 
     int kvm_fd;
     bool kvm_vcpu_dirty;
@@ -189,7 +207,13 @@ struct CPUState {
     uint32_t halted; /* used by alpha, cris, ppc TCG */
 };
 
-extern CPUState *first_cpu;
+QTAILQ_HEAD(CPUTailQ, CPUState);
+extern struct CPUTailQ cpus;
+#define CPU_NEXT(cpu) QTAILQ_NEXT(cpu, node)
+#define CPU_FOREACH(cpu) QTAILQ_FOREACH(cpu, &cpus, node)
+#define CPU_FOREACH_SAFE(cpu, next_cpu) \
+    QTAILQ_FOREACH_SAFE(cpu, &cpus, node, next_cpu)
+#define first_cpu QTAILQ_FIRST(&cpus)
 
 DECLARE_TLS(CPUState *, current_cpu);
 #define current_cpu tls_var(current_cpu)
@@ -381,15 +405,6 @@ void run_on_cpu(CPUState *cpu, void (*func)(void *data), void *data);
  * Schedules the function @func for execution on the vCPU @cpu asynchronously.
  */
 void async_run_on_cpu(CPUState *cpu, void (*func)(void *data), void *data);
-
-/**
- * qemu_for_each_cpu:
- * @func: The function to be executed.
- * @data: Data to pass to the function.
- *
- * Executes @func for each CPU.
- */
-void qemu_for_each_cpu(void (*func)(CPUState *cpu, void *data), void *data);
 
 /**
  * qemu_get_cpu:

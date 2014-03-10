@@ -14,6 +14,7 @@
 #include "hw/hw.h"
 #include "cpu.h"
 #include "sysemu/kvm.h"
+#include "sysemu/qemumachine.h"
 
 #ifndef CONFIG_USER_ONLY
 #include "hw/pci/msi.h"
@@ -25,6 +26,7 @@ bool kvm_async_interrupts_allowed;
 bool kvm_irqfds_allowed;
 bool kvm_msi_via_irqfd_allowed;
 bool kvm_gsi_routing_allowed;
+bool kvm_gsi_direct_mapping;
 bool kvm_allowed;
 bool kvm_readonly_mem_allowed;
 
@@ -33,7 +35,7 @@ int kvm_init_vcpu(CPUState *cpu)
     return -ENOSYS;
 }
 
-int kvm_init(void)
+int kvm_init(QEMUMachine *machine)
 {
     return -ENOSYS;
 }
@@ -78,7 +80,7 @@ void kvm_setup_guest_memory(void *start, size_t size)
 {
 }
 
-int kvm_update_guest_debug(CPUArchState *env, unsigned long reinject_trap)
+int kvm_update_guest_debug(CPUState *cpu, unsigned long reinject_trap)
 {
     return -ENOSYS;
 }
@@ -135,7 +137,8 @@ int kvm_irqchip_update_msi_route(KVMState *s, int virq, MSIMessage msg)
     return -ENOSYS;
 }
 
-int kvm_irqchip_add_irqfd_notifier(KVMState *s, EventNotifier *n, int virq)
+int kvm_irqchip_add_irqfd_notifier(KVMState *s, EventNotifier *n,
+                                   EventNotifier *rn, int virq)
 {
     return -ENOSYS;
 }

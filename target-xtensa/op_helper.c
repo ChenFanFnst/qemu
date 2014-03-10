@@ -28,6 +28,8 @@
 #include "cpu.h"
 #include "helper.h"
 #include "qemu/host-utils.h"
+#include "exec/softmmu_exec.h"
+#include "exec/address-spaces.h"
 
 static void do_unaligned_access(CPUXtensaState *env,
         target_ulong addr, int is_write, int is_user, uintptr_t retaddr);
@@ -89,13 +91,16 @@ static void tb_invalidate_virtual_addr(CPUXtensaState *env, uint32_t vaddr)
     int ret = xtensa_get_physical_addr(env, false, vaddr, 2, 0,
             &paddr, &page_size, &access);
     if (ret == 0) {
-        tb_invalidate_phys_addr(paddr);
+        tb_invalidate_phys_addr(&address_space_memory, paddr);
     }
 }
 
 void HELPER(exception)(CPUXtensaState *env, uint32_t excp)
 {
     env->exception_index = excp;
+    if (excp == EXCP_DEBUG) {
+        env->exception_taken = 0;
+    }
     cpu_loop_exit(env);
 }
 
@@ -387,7 +392,7 @@ void HELPER(waiti)(CPUXtensaState *env, uint32_t pc, uint32_t intlevel)
     }
 
     cpu = CPU(xtensa_env_get_cpu(env));
-    env->halt_clock = qemu_get_clock_ns(vm_clock);
+    env->halt_clock = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     cpu->halted = 1;
     if (xtensa_option_enabled(env->config, XTENSA_OPTION_TIMER_INTERRUPT)) {
         xtensa_rearm_ccompare_timer(env);
@@ -408,6 +413,11 @@ void HELPER(advance_ccount)(CPUXtensaState *env, uint32_t d)
 void HELPER(check_interrupts)(CPUXtensaState *env)
 {
     check_interrupts(env);
+}
+
+void HELPER(itlb_hit_test)(CPUXtensaState *env, uint32_t vaddr)
+{
+    get_page_addr_code(env, vaddr);
 }
 
 /*!
@@ -448,8 +458,10 @@ void HELPER(check_atomctl)(CPUXtensaState *env, uint32_t pc, uint32_t vaddr)
     switch (access & PAGE_CACHE_MASK) {
     case PAGE_CACHE_WB:
         atomctl >>= 2;
+        /* fall through */
     case PAGE_CACHE_WT:
         atomctl >>= 2;
+        /* fall through */
     case PAGE_CACHE_BYPASS:
         if ((atomctl & 0x3) == 0) {
             HELPER(exception_cause_vaddr)(env, pc,

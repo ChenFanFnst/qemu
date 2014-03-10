@@ -322,7 +322,7 @@ static inline void gen_goto_tb(DisasContext *s, int tb_num,
         tcg_gen_goto_tb(tb_num);
         tcg_gen_movi_tl(cpu_pc, pc);
         tcg_gen_movi_tl(cpu_npc, npc);
-        tcg_gen_exit_tb((tcg_target_long)tb + tb_num);
+        tcg_gen_exit_tb((uintptr_t)tb + tb_num);
     } else {
         /* jump to another page: currently not optimized */
         tcg_gen_movi_tl(cpu_pc, pc);
@@ -3626,6 +3626,7 @@ static void disas_sparc_insn(DisasContext * dc, unsigned int insn)
                                 if ((rd == 0x13) && (dc->def->features &
                                                      CPU_FEATURE_POWERDOWN)) {
                                     /* LEON3 power-down */
+                                    save_state(dc);
                                     gen_helper_power_down(cpu_env);
                                 }
                                 break;
@@ -5456,11 +5457,6 @@ void gen_intermediate_code_init(CPUSPARCState *env)
                                                 offsetof(CPUSPARCState, fpr[i]),
                                                 fregnames[i]);
         }
-
-        /* register helpers */
-
-#define GEN_HELPER 2
-#include "helper.h"
     }
 }
 

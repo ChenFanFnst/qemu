@@ -32,6 +32,7 @@
 #include "sysemu/cpus.h"
 #include "sysemu/kvm.h"
 #include "kvm_ppc.h"
+#include "mmu-hash64.h"
 
 #include "hw/boards.h"
 #include "hw/ppc/ppc.h"
@@ -48,6 +49,7 @@
 #include "exec/address-spaces.h"
 #include "hw/usb.h"
 #include "qemu/config-file.h"
+#include "qemu/error-report.h"
 
 #include <libfdt.h>
 
@@ -61,7 +63,7 @@
  *
  * We load our kernel at 4M, leaving space for SLOF initial image
  */
-#define FDT_MAX_SIZE            0x10000
+#define FDT_MAX_SIZE            0x40000
 #define RTAS_MAX_SIZE           0x10000
 #define FW_MAX_SIZE             0x400000
 #define FW_FILE_NAME            "slof.bin"
@@ -87,6 +89,9 @@ int spapr_allocate_irq(int hint, bool lsi)
 
     if (hint) {
         irq = hint;
+        if (hint >= spapr->next_irq) {
+            spapr->next_irq = hint + 1;
+        }
         /* FIXME: we should probably check for collisions somehow */
     } else {
         irq = spapr->next_irq++;
@@ -102,22 +107,39 @@ int spapr_allocate_irq(int hint, bool lsi)
     return irq;
 }
 
-/* Allocate block of consequtive IRQs, returns a number of the first */
-int spapr_allocate_irq_block(int num, bool lsi)
+/*
+ * Allocate block of consequtive IRQs, returns a number of the first.
+ * If msi==true, aligns the first IRQ number to num.
+ */
+int spapr_allocate_irq_block(int num, bool lsi, bool msi)
 {
     int first = -1;
-    int i;
+    int i, hint = 0;
+
+    /*
+     * MSIMesage::data is used for storing VIRQ so
+     * it has to be aligned to num to support multiple
+     * MSI vectors. MSI-X is not affected by this.
+     * The hint is used for the first IRQ, the rest should
+     * be allocated continuously.
+     */
+    if (msi) {
+        assert((num == 1) || (num == 2) || (num == 4) ||
+               (num == 8) || (num == 16) || (num == 32));
+        hint = (spapr->next_irq + num - 1) & ~(num - 1);
+    }
 
     for (i = 0; i < num; ++i) {
         int irq;
 
-        irq = spapr_allocate_irq(0, lsi);
+        irq = spapr_allocate_irq(hint, lsi);
         if (!irq) {
             return -1;
         }
 
         if (0 == i) {
             first = irq;
+            hint = 0;
         }
 
         /* If the above doesn't create a consecutive block then that's
@@ -128,6 +150,53 @@ int spapr_allocate_irq_block(int num, bool lsi)
     return first;
 }
 
+static XICSState *try_create_xics(const char *type, int nr_servers,
+                                  int nr_irqs)
+{
+    DeviceState *dev;
+
+    dev = qdev_create(NULL, type);
+    qdev_prop_set_uint32(dev, "nr_servers", nr_servers);
+    qdev_prop_set_uint32(dev, "nr_irqs", nr_irqs);
+    if (qdev_init(dev) < 0) {
+        return NULL;
+    }
+
+    return XICS_COMMON(dev);
+}
+
+static XICSState *xics_system_init(int nr_servers, int nr_irqs)
+{
+    XICSState *icp = NULL;
+
+    if (kvm_enabled()) {
+        QemuOpts *machine_opts = qemu_get_machine_opts();
+        bool irqchip_allowed = qemu_opt_get_bool(machine_opts,
+                                                "kernel_irqchip", true);
+        bool irqchip_required = qemu_opt_get_bool(machine_opts,
+                                                  "kernel_irqchip", false);
+        if (irqchip_allowed) {
+            icp = try_create_xics(TYPE_KVM_XICS, nr_servers, nr_irqs);
+        }
+
+        if (irqchip_required && !icp) {
+            perror("Failed to create in-kernel XICS\n");
+            abort();
+        }
+    }
+
+    if (!icp) {
+        icp = try_create_xics(TYPE_XICS, nr_servers, nr_irqs);
+    }
+
+    if (!icp) {
+        perror("Failed to create XICS\n");
+        abort();
+    }
+
+    return icp;
+}
+
 static int spapr_fixup_cpu_dt(void *fdt, sPAPREnvironment *spapr)
 {
     int ret = 0, offset;
@@ -136,22 +205,22 @@ static int spapr_fixup_cpu_dt(void *fdt, sPAPREnvironment *spapr)
     int smt = kvmppc_smt_threads();
     uint32_t pft_size_prop[] = {0, cpu_to_be32(spapr->htab_shift)};
 
-    assert(spapr->cpu_model);
-
-    for (cpu = first_cpu; cpu != NULL; cpu = cpu->next_cpu) {
+    CPU_FOREACH(cpu) {
+        DeviceClass *dc = DEVICE_GET_CLASS(cpu);
+        int index = ppc_get_vcpu_dt_id(POWERPC_CPU(cpu));
         uint32_t associativity[] = {cpu_to_be32(0x5),
                                     cpu_to_be32(0x0),
                                     cpu_to_be32(0x0),
                                     cpu_to_be32(0x0),
                                     cpu_to_be32(cpu->numa_node),
-                                    cpu_to_be32(cpu->cpu_index)};
+                                    cpu_to_be32(index)};
 
-        if ((cpu->cpu_index % smt) != 0) {
+        if ((index % smt) != 0) {
             continue;
         }
 
-        snprintf(cpu_model, 32, "/cpus/%s@%x", spapr->cpu_model,
-                 cpu->cpu_index);
+        snprintf(cpu_model, 32, "/cpus/%s@%x", dc->fw_name,
+                 index);
 
         offset = fdt_path_offset(fdt, cpu_model);
         if (offset < 0) {
@@ -220,10 +289,10 @@ static size_t create_page_sizes_prop(CPUPPCState *env, uint32_t *prop,
     } while (0)
 
 
-static void *spapr_create_fdt_skel(const char *cpu_model,
-                                   hwaddr initrd_base,
+static void *spapr_create_fdt_skel(hwaddr initrd_base,
                                    hwaddr initrd_size,
                                    hwaddr kernel_size,
+                                   bool little_endian,
                                    const char *boot_device,
                                    const char *kernel_cmdline,
                                    uint32_t epow_irq)
@@ -233,11 +302,10 @@ static void *spapr_create_fdt_skel(const char *cpu_model,
     uint32_t start_prop = cpu_to_be32(initrd_base);
     uint32_t end_prop = cpu_to_be32(initrd_base + initrd_size);
     char hypertas_prop[] = "hcall-pft\0hcall-term\0hcall-dabr\0hcall-interrupt"
-        "\0hcall-tce\0hcall-vio\0hcall-splpar\0hcall-bulk";
+        "\0hcall-tce\0hcall-vio\0hcall-splpar\0hcall-bulk\0hcall-set-mode";
     char qemu_hypertas_prop[] = "hcall-memop1";
     uint32_t refpoints[] = {cpu_to_be32(0x4), cpu_to_be32(0x4)};
     uint32_t interrupt_server_ranges_prop[] = {0, cpu_to_be32(smp_cpus)};
-    char *modelname;
     int i, smt = kvmppc_smt_threads();
     unsigned char vec5[] = {0x0, 0x0, 0x0, 0x0, 0x0, 0x80};
 
@@ -277,6 +345,9 @@ static void *spapr_create_fdt_skel(const char *cpu_model,
                               cpu_to_be64(kernel_size) };
 
         _FDT((fdt_property(fdt, "qemu,boot-kernel", &kprop, sizeof(kprop))));
+        if (little_endian) {
+            _FDT((fdt_property(fdt, "qemu,boot-kernel-le", NULL, 0)));
+        }
     }
     if (boot_device) {
         _FDT((fdt_property_string(fdt, "qemu,boot-device", boot_device)));
@@ -293,20 +364,12 @@ static void *spapr_create_fdt_skel(const char *cpu_model,
     _FDT((fdt_property_cell(fdt, "#address-cells", 0x1)));
     _FDT((fdt_property_cell(fdt, "#size-cells", 0x0)));
 
-    modelname = g_strdup(cpu_model);
-
-    for (i = 0; i < strlen(modelname); i++) {
-        modelname[i] = toupper(modelname[i]);
-    }
-
-    /* This is needed during FDT finalization */
-    spapr->cpu_model = g_strdup(modelname);
-
-    for (cs = first_cpu; cs != NULL; cs = cs->next_cpu) {
+    CPU_FOREACH(cs) {
         PowerPCCPU *cpu = POWERPC_CPU(cs);
         CPUPPCState *env = &cpu->env;
+        DeviceClass *dc = DEVICE_GET_CLASS(cs);
         PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cs);
-        int index = cs->cpu_index;
+        int index = ppc_get_vcpu_dt_id(cpu);
         uint32_t servers_prop[smp_threads];
         uint32_t gservers_prop[smp_threads * 2];
         char *nodename;
@@ -321,7 +384,7 @@ static void *spapr_create_fdt_skel(const char *cpu_model,
             continue;
         }
 
-        nodename = g_strdup_printf("%s@%x", modelname, index);
+        nodename = g_strdup_printf("%s@%x", dc->fw_name, index);
 
         _FDT((fdt_begin_node(fdt, nodename)));
 
@@ -369,6 +432,10 @@ static void *spapr_create_fdt_skel(const char *cpu_model,
         _FDT((fdt_property(fdt, "ibm,ppc-interrupt-gserver#s",
                            gservers_prop, sizeof(gservers_prop))));
 
+        if (env->spr_cb[SPR_PURR].oea_read) {
+            _FDT((fdt_property(fdt, "ibm,purr", NULL, 0)));
+        }
+
         if (env->mmu_model & POWERPC_MMU_1TSEG) {
             _FDT((fdt_property(fdt, "ibm,processor-segment-sizes",
                                segs, sizeof(segs))));
@@ -400,8 +467,6 @@ static void *spapr_create_fdt_skel(const char *cpu_model,
 
         _FDT((fdt_end_node(fdt)));
     }
-
-    g_free(modelname);
 
     _FDT((fdt_end_node(fdt)));
 
@@ -463,14 +528,15 @@ static int spapr_populate_memory(sPAPREnvironment *spapr, void *fdt)
                                 cpu_to_be32(0x0), cpu_to_be32(0x0),
                                 cpu_to_be32(0x0)};
     char mem_name[32];
-    hwaddr node0_size, mem_start;
+    hwaddr node0_size, mem_start, node_size;
     uint64_t mem_reg_property[2];
     int i, off;
 
     /* memory node(s) */
-    node0_size = (nb_numa_nodes > 1) ? node_mem[0] : ram_size;
-    if (spapr->rma_size > node0_size) {
-        spapr->rma_size = node0_size;
+    if (nb_numa_nodes > 1 && node_mem[0] < ram_size) {
+        node0_size = node_mem[0];
+    } else {
+        node0_size = ram_size;
     }
 
     /* RMA */
@@ -503,7 +569,15 @@ static int spapr_populate_memory(sPAPREnvironment *spapr, void *fdt)
     mem_start = node0_size;
     for (i = 1; i < nb_numa_nodes; i++) {
         mem_reg_property[0] = cpu_to_be64(mem_start);
-        mem_reg_property[1] = cpu_to_be64(node_mem[i]);
+        if (mem_start >= ram_size) {
+            node_size = 0;
+        } else {
+            node_size = node_mem[i];
+            if (node_size > ram_size - mem_start) {
+                node_size = ram_size - mem_start;
+            }
+        }
+        mem_reg_property[1] = cpu_to_be64(node_size);
         associativity[3] = associativity[4] = cpu_to_be32(i);
         sprintf(mem_name, "memory@" TARGET_FMT_lx, mem_start);
         off = fdt_add_subnode(fdt, 0, mem_name);
@@ -513,7 +587,7 @@ static int spapr_populate_memory(sPAPREnvironment *spapr, void *fdt)
                           sizeof(mem_reg_property))));
         _FDT((fdt_setprop(fdt, off, "ibm,associativity", associativity,
                           sizeof(associativity))));
-        mem_start += node_mem[i];
+        mem_start += node_size;
     }
 
     return 0;
@@ -613,6 +687,7 @@ static void spapr_reset_htab(sPAPREnvironment *spapr)
     if (shift > 0) {
         /* Kernel handles htab, we don't need to allocate one */
         spapr->htab_shift = shift;
+        kvmppc_kern_htab = true;
     } else {
         if (!spapr->htab) {
             /* Allocate an htab if we don't yet have one */
@@ -625,7 +700,8 @@ static void spapr_reset_htab(sPAPREnvironment *spapr)
 
     /* Update the RMA size if necessary */
     if (spapr->vrma_adjust) {
-        spapr->rma_size = kvmppc_rma_size(ram_size, spapr->htab_shift);
+        hwaddr node0_size = (nb_numa_nodes > 1) ? node_mem[0] : ram_size;
+        spapr->rma_size = kvmppc_rma_size(node0_size, spapr->htab_shift);
     }
 }
 
@@ -666,9 +742,22 @@ static void spapr_cpu_reset(void *opaque)
 
     env->spr[SPR_HIOR] = 0;
 
-    env->external_htab = spapr->htab;
+    env->external_htab = (uint8_t *)spapr->htab;
+    if (kvm_enabled() && !env->external_htab) {
+        /*
+         * HV KVM, set external_htab to 1 so our ppc_hash64_load_hpte*
+         * functions do the right thing.
+         */
+        env->external_htab = (void *)1;
+    }
     env->htab_base = -1;
-    env->htab_mask = HTAB_SIZE(spapr) - 1;
+    /*
+     * htab_mask is the mask used to normalize hash value to PTEG index.
+     * htab_shift is log2 of hash table size.
+     * We have 8 hpte per group, and each hpte is 16 bytes.
+     * ie have 128 bytes per hpte entry.
+     */
+    env->htab_mask = (1ULL << ((spapr)->htab_shift - 7)) - 1;
     env->spr[SPR_SDR1] = (target_ulong)(uintptr_t)spapr->htab |
         (spapr->htab_shift - 18);
 }
@@ -676,18 +765,10 @@ static void spapr_cpu_reset(void *opaque)
 static void spapr_create_nvram(sPAPREnvironment *spapr)
 {
     DeviceState *dev = qdev_create(&spapr->vio_bus->bus, "spapr-nvram");
-    const char *drivename = qemu_opt_get(qemu_get_machine_opts(), "nvram");
+    DriveInfo *dinfo = drive_get(IF_PFLASH, 0, 0);
 
-    if (drivename) {
-        BlockDriverState *bs;
-
-        bs = bdrv_find(drivename);
-        if (!bs) {
-            fprintf(stderr, "No such block device \"%s\" for nvram\n",
-                    drivename);
-            exit(1);
-        }
-        qdev_prop_set_drive_nofail(dev, "drive", bs);
+    if (dinfo) {
+        qdev_prop_set_drive_nofail(dev, "drive", dinfo->bdrv);
     }
 
     qdev_init_nofail(dev);
@@ -710,6 +791,330 @@ static int spapr_vga_init(PCIBus *pci_bus)
     }
 }
 
+static const VMStateDescription vmstate_spapr = {
+    .name = "spapr",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .minimum_version_id_old = 1,
+    .fields      = (VMStateField []) {
+        VMSTATE_UINT32(next_irq, sPAPREnvironment),
+
+        /* RTC offset */
+        VMSTATE_UINT64(rtc_offset, sPAPREnvironment),
+
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+#define HPTE(_table, _i)   (void *)(((uint64_t *)(_table)) + ((_i) * 2))
+#define HPTE_VALID(_hpte)  (tswap64(*((uint64_t *)(_hpte))) & HPTE64_V_VALID)
+#define HPTE_DIRTY(_hpte)  (tswap64(*((uint64_t *)(_hpte))) & HPTE64_V_HPTE_DIRTY)
+#define CLEAN_HPTE(_hpte)  ((*(uint64_t *)(_hpte)) &= tswap64(~HPTE64_V_HPTE_DIRTY))
+
+static int htab_save_setup(QEMUFile *f, void *opaque)
+{
+    sPAPREnvironment *spapr = opaque;
+
+    /* "Iteration" header */
+    qemu_put_be32(f, spapr->htab_shift);
+
+    if (spapr->htab) {
+        spapr->htab_save_index = 0;
+        spapr->htab_first_pass = true;
+    } else {
+        assert(kvm_enabled());
+
+        spapr->htab_fd = kvmppc_get_htab_fd(false);
+        if (spapr->htab_fd < 0) {
+            fprintf(stderr, "Unable to open fd for reading hash table from KVM: %s\n",
+                    strerror(errno));
+            return -1;
+        }
+    }
+
+
+    return 0;
+}
+
+static void htab_save_first_pass(QEMUFile *f, sPAPREnvironment *spapr,
+                                 int64_t max_ns)
+{
+    int htabslots = HTAB_SIZE(spapr) / HASH_PTE_SIZE_64;
+    int index = spapr->htab_save_index;
+    int64_t starttime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    assert(spapr->htab_first_pass);
+
+    do {
+        int chunkstart;
+
+        /* Consume invalid HPTEs */
+        while ((index < htabslots)
+               && !HPTE_VALID(HPTE(spapr->htab, index))) {
+            index++;
+            CLEAN_HPTE(HPTE(spapr->htab, index));
+        }
+
+        /* Consume valid HPTEs */
+        chunkstart = index;
+        while ((index < htabslots)
+               && HPTE_VALID(HPTE(spapr->htab, index))) {
+            index++;
+            CLEAN_HPTE(HPTE(spapr->htab, index));
+        }
+
+        if (index > chunkstart) {
+            int n_valid = index - chunkstart;
+
+            qemu_put_be32(f, chunkstart);
+            qemu_put_be16(f, n_valid);
+            qemu_put_be16(f, 0);
+            qemu_put_buffer(f, HPTE(spapr->htab, chunkstart),
+                            HASH_PTE_SIZE_64 * n_valid);
+
+            if ((qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - starttime) > max_ns) {
+                break;
+            }
+        }
+    } while ((index < htabslots) && !qemu_file_rate_limit(f));
+
+    if (index >= htabslots) {
+        assert(index == htabslots);
+        index = 0;
+        spapr->htab_first_pass = false;
+    }
+    spapr->htab_save_index = index;
+}
+
+static int htab_save_later_pass(QEMUFile *f, sPAPREnvironment *spapr,
+                                int64_t max_ns)
+{
+    bool final = max_ns < 0;
+    int htabslots = HTAB_SIZE(spapr) / HASH_PTE_SIZE_64;
+    int examined = 0, sent = 0;
+    int index = spapr->htab_save_index;
+    int64_t starttime = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    assert(!spapr->htab_first_pass);
+
+    do {
+        int chunkstart, invalidstart;
+
+        /* Consume non-dirty HPTEs */
+        while ((index < htabslots)
+               && !HPTE_DIRTY(HPTE(spapr->htab, index))) {
+            index++;
+            examined++;
+        }
+
+        chunkstart = index;
+        /* Consume valid dirty HPTEs */
+        while ((index < htabslots)
+               && HPTE_DIRTY(HPTE(spapr->htab, index))
+               && HPTE_VALID(HPTE(spapr->htab, index))) {
+            CLEAN_HPTE(HPTE(spapr->htab, index));
+            index++;
+            examined++;
+        }
+
+        invalidstart = index;
+        /* Consume invalid dirty HPTEs */
+        while ((index < htabslots)
+               && HPTE_DIRTY(HPTE(spapr->htab, index))
+               && !HPTE_VALID(HPTE(spapr->htab, index))) {
+            CLEAN_HPTE(HPTE(spapr->htab, index));
+            index++;
+            examined++;
+        }
+
+        if (index > chunkstart) {
+            int n_valid = invalidstart - chunkstart;
+            int n_invalid = index - invalidstart;
+
+            qemu_put_be32(f, chunkstart);
+            qemu_put_be16(f, n_valid);
+            qemu_put_be16(f, n_invalid);
+            qemu_put_buffer(f, HPTE(spapr->htab, chunkstart),
+                            HASH_PTE_SIZE_64 * n_valid);
+            sent += index - chunkstart;
+
+            if (!final && (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - starttime) > max_ns) {
+                break;
+            }
+        }
+
+        if (examined >= htabslots) {
+            break;
+        }
+
+        if (index >= htabslots) {
+            assert(index == htabslots);
+            index = 0;
+        }
+    } while ((examined < htabslots) && (!qemu_file_rate_limit(f) || final));
+
+    if (index >= htabslots) {
+        assert(index == htabslots);
+        index = 0;
+    }
+
+    spapr->htab_save_index = index;
+
+    return (examined >= htabslots) && (sent == 0) ? 1 : 0;
+}
+
+#define MAX_ITERATION_NS    5000000 /* 5 ms */
+#define MAX_KVM_BUF_SIZE    2048
+
+static int htab_save_iterate(QEMUFile *f, void *opaque)
+{
+    sPAPREnvironment *spapr = opaque;
+    int rc = 0;
+
+    /* Iteration header */
+    qemu_put_be32(f, 0);
+
+    if (!spapr->htab) {
+        assert(kvm_enabled());
+
+        rc = kvmppc_save_htab(f, spapr->htab_fd,
+                              MAX_KVM_BUF_SIZE, MAX_ITERATION_NS);
+        if (rc < 0) {
+            return rc;
+        }
+    } else  if (spapr->htab_first_pass) {
+        htab_save_first_pass(f, spapr, MAX_ITERATION_NS);
+    } else {
+        rc = htab_save_later_pass(f, spapr, MAX_ITERATION_NS);
+    }
+
+    /* End marker */
+    qemu_put_be32(f, 0);
+    qemu_put_be16(f, 0);
+    qemu_put_be16(f, 0);
+
+    return rc;
+}
+
+static int htab_save_complete(QEMUFile *f, void *opaque)
+{
+    sPAPREnvironment *spapr = opaque;
+
+    /* Iteration header */
+    qemu_put_be32(f, 0);
+
+    if (!spapr->htab) {
+        int rc;
+
+        assert(kvm_enabled());
+
+        rc = kvmppc_save_htab(f, spapr->htab_fd, MAX_KVM_BUF_SIZE, -1);
+        if (rc < 0) {
+            return rc;
+        }
+        close(spapr->htab_fd);
+        spapr->htab_fd = -1;
+    } else {
+        htab_save_later_pass(f, spapr, -1);
+    }
+
+    /* End marker */
+    qemu_put_be32(f, 0);
+    qemu_put_be16(f, 0);
+    qemu_put_be16(f, 0);
+
+    return 0;
+}
+
+static int htab_load(QEMUFile *f, void *opaque, int version_id)
+{
+    sPAPREnvironment *spapr = opaque;
+    uint32_t section_hdr;
+    int fd = -1;
+
+    if (version_id < 1 || version_id > 1) {
+        fprintf(stderr, "htab_load() bad version\n");
+        return -EINVAL;
+    }
+
+    section_hdr = qemu_get_be32(f);
+
+    if (section_hdr) {
+        /* First section, just the hash shift */
+        if (spapr->htab_shift != section_hdr) {
+            return -EINVAL;
+        }
+        return 0;
+    }
+
+    if (!spapr->htab) {
+        assert(kvm_enabled());
+
+        fd = kvmppc_get_htab_fd(true);
+        if (fd < 0) {
+            fprintf(stderr, "Unable to open fd to restore KVM hash table: %s\n",
+                    strerror(errno));
+        }
+    }
+
+    while (true) {
+        uint32_t index;
+        uint16_t n_valid, n_invalid;
+
+        index = qemu_get_be32(f);
+        n_valid = qemu_get_be16(f);
+        n_invalid = qemu_get_be16(f);
+
+        if ((index == 0) && (n_valid == 0) && (n_invalid == 0)) {
+            /* End of Stream */
+            break;
+        }
+
+        if ((index + n_valid + n_invalid) >
+            (HTAB_SIZE(spapr) / HASH_PTE_SIZE_64)) {
+            /* Bad index in stream */
+            fprintf(stderr, "htab_load() bad index %d (%hd+%hd entries) "
+                    "in htab stream (htab_shift=%d)\n", index, n_valid, n_invalid,
+                    spapr->htab_shift);
+            return -EINVAL;
+        }
+
+        if (spapr->htab) {
+            if (n_valid) {
+                qemu_get_buffer(f, HPTE(spapr->htab, index),
+                                HASH_PTE_SIZE_64 * n_valid);
+            }
+            if (n_invalid) {
+                memset(HPTE(spapr->htab, index + n_valid), 0,
+                       HASH_PTE_SIZE_64 * n_invalid);
+            }
+        } else {
+            int rc;
+
+            assert(fd >= 0);
+
+            rc = kvmppc_load_htab_chunk(f, fd, index, n_valid, n_invalid);
+            if (rc < 0) {
+                return rc;
+            }
+        }
+    }
+
+    if (!spapr->htab) {
+        assert(fd >= 0);
+        close(fd);
+    }
+
+    return 0;
+}
+
+static SaveVMHandlers savevm_htab_handlers = {
+    .save_live_setup = htab_save_setup,
+    .save_live_iterate = htab_save_iterate,
+    .save_live_complete = htab_save_complete,
+    .load_state = htab_load,
+};
+
 /* pSeries LPAR / sPAPR hardware init */
 static void ppc_spapr_init(QEMUMachineInitArgs *args)
 {
@@ -718,7 +1123,7 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
     const char *kernel_filename = args->kernel_filename;
     const char *kernel_cmdline = args->kernel_cmdline;
     const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_device;
+    const char *boot_device = args->boot_order;
     PowerPCCPU *cpu;
     CPUPPCState *env;
     PCIHostState *phb;
@@ -726,9 +1131,11 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
     MemoryRegion *sysmem = get_system_memory();
     MemoryRegion *ram = g_new(MemoryRegion, 1);
     hwaddr rma_alloc_size;
+    hwaddr node0_size = (nb_numa_nodes > 1) ? node_mem[0] : ram_size;
     uint32_t initrd_base = 0;
     long kernel_size = 0, initrd_size = 0;
     long load_limit, rtas_limit, fw_size;
+    bool kernel_le = false;
     char *filename;
 
     msi_supported = true;
@@ -746,10 +1153,10 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
         exit(1);
     }
 
-    if (rma_alloc_size && (rma_alloc_size < ram_size)) {
+    if (rma_alloc_size && (rma_alloc_size < node0_size)) {
         spapr->rma_size = rma_alloc_size;
     } else {
-        spapr->rma_size = ram_size;
+        spapr->rma_size = node0_size;
 
         /* With KVM, we don't actually know whether KVM supports an
          * unbounded RMA (PR KVM) or is limited by the hash table size
@@ -764,6 +1171,12 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
             spapr->vrma_adjust = 1;
             spapr->rma_size = MIN(spapr->rma_size, 0x10000000);
         }
+    }
+
+    if (spapr->rma_size > node0_size) {
+        fprintf(stderr, "Error: Numa node 0 has to span the RMA (%#08"HWADDR_PRIx")\n",
+                spapr->rma_size);
+        exit(1);
     }
 
     /* We place the device tree and RTAS just below either the top of the RMA,
@@ -802,8 +1215,6 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
         }
         env = &cpu->env;
 
-        xics_cpu_setup(spapr->icp, cpu);
-
         /* Set time-base frequency to 512 MHz */
         cpu_ppc_tb_init(env, TIMEBASE_FREQ);
 
@@ -816,6 +1227,8 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
         if (kvm_enabled()) {
             kvmppc_set_papr(cpu);
         }
+
+        xics_cpu_setup(spapr->icp, cpu);
 
         qemu_register_reset(spapr_cpu_reset, cpu);
     }
@@ -848,9 +1261,6 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
     /* Set up EPOW events infrastructure */
     spapr_events_init(spapr);
 
-    /* Set up IOMMU */
-    spapr_iommu_init();
-
     /* Set up VIO bus */
     spapr->vio_bus = spapr_vio_bus_init();
 
@@ -864,6 +1274,7 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
     spapr_create_nvram(spapr);
 
     /* Set up PCI */
+    spapr_pci_msi_init(spapr, SPAPR_PCI_MSI_WINDOW);
     spapr_pci_rtas_init();
 
     phb = spapr_create_phb(spapr, 0);
@@ -910,14 +1321,15 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
 
         kernel_size = load_elf(kernel_filename, translate_kernel_address, NULL,
                                NULL, &lowaddr, NULL, 1, ELF_MACHINE, 0);
-        if (kernel_size < 0) {
-            kernel_size = load_image_targphys(kernel_filename,
-                                              KERNEL_LOAD_ADDR,
-                                              load_limit - KERNEL_LOAD_ADDR);
+        if (kernel_size == ELF_LOAD_WRONG_ENDIAN) {
+            kernel_size = load_elf(kernel_filename,
+                                   translate_kernel_address, NULL,
+                                   NULL, &lowaddr, NULL, 0, ELF_MACHINE, 0);
+            kernel_le = kernel_size > 0;
         }
         if (kernel_size < 0) {
-            fprintf(stderr, "qemu: could not load kernel '%s'\n",
-                    kernel_filename);
+            fprintf(stderr, "qemu: error loading %s: %s\n",
+                    kernel_filename, load_elf_strerror(kernel_size));
             exit(1);
         }
 
@@ -953,13 +1365,34 @@ static void ppc_spapr_init(QEMUMachineInitArgs *args)
 
     spapr->entry_point = 0x100;
 
+    vmstate_register(NULL, 0, &vmstate_spapr, spapr);
+    register_savevm_live(NULL, "spapr/htab", -1, 1,
+                         &savevm_htab_handlers, spapr);
+
     /* Prepare the device tree */
-    spapr->fdt_skel = spapr_create_fdt_skel(cpu_model,
-                                            initrd_base, initrd_size,
-                                            kernel_size,
+    spapr->fdt_skel = spapr_create_fdt_skel(initrd_base, initrd_size,
+                                            kernel_size, kernel_le,
                                             boot_device, kernel_cmdline,
                                             spapr->epow_irq);
     assert(spapr->fdt_skel != NULL);
+}
+
+static int spapr_kvm_type(const char *vm_type)
+{
+    if (!vm_type) {
+        return 0;
+    }
+
+    if (!strcmp(vm_type, "HV")) {
+        return 1;
+    }
+
+    if (!strcmp(vm_type, "PR")) {
+        return 2;
+    }
+
+    error_report("Unknown kvm-type specified '%s'", vm_type);
+    exit(1);
 }
 
 static QEMUMachine spapr_machine = {
@@ -971,7 +1404,8 @@ static QEMUMachine spapr_machine = {
     .block_default_type = IF_SCSI,
     .max_cpus = MAX_CPUS,
     .no_parallel = 1,
-    .boot_order = NULL,
+    .default_boot_order = NULL,
+    .kvm_type = spapr_kvm_type,
 };
 
 static void spapr_machine_init(void)

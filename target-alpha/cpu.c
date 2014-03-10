@@ -33,7 +33,10 @@ static void alpha_cpu_set_pc(CPUState *cs, vaddr value)
 
 static void alpha_cpu_realizefn(DeviceState *dev, Error **errp)
 {
+    CPUState *cs = CPU(dev);
     AlphaCPUClass *acc = ALPHA_CPU_GET_CLASS(dev);
+
+    qemu_init_vcpu(cs);
 
     acc->parent_realize(dev, errp);
 }
@@ -128,7 +131,6 @@ static ObjectClass *alpha_cpu_class_by_name(const char *cpu_model)
 AlphaCPU *cpu_alpha_init(const char *cpu_model)
 {
     AlphaCPU *cpu;
-    CPUAlphaState *env;
     ObjectClass *cpu_class;
 
     cpu_class = alpha_cpu_class_by_name(cpu_model);
@@ -137,9 +139,6 @@ AlphaCPU *cpu_alpha_init(const char *cpu_model)
         cpu_class = object_class_by_name(TYPE("ev67"));
     }
     cpu = ALPHA_CPU(object_new(object_class_get_name(cpu_class)));
-    env = &cpu->env;
-
-    env->cpu_model_str = cpu_model;
 
     object_property_set_bool(OBJECT(cpu), true, "realized", NULL);
 
@@ -271,11 +270,14 @@ static void alpha_cpu_class_init(ObjectClass *oc, void *data)
     cc->do_interrupt = alpha_cpu_do_interrupt;
     cc->dump_state = alpha_cpu_dump_state;
     cc->set_pc = alpha_cpu_set_pc;
+    cc->gdb_read_register = alpha_cpu_gdb_read_register;
+    cc->gdb_write_register = alpha_cpu_gdb_write_register;
 #ifndef CONFIG_USER_ONLY
     cc->do_unassigned_access = alpha_cpu_unassigned_access;
     cc->get_phys_page_debug = alpha_cpu_get_phys_page_debug;
     dc->vmsd = &vmstate_alpha_cpu;
 #endif
+    cc->gdb_num_core_regs = 67;
 }
 
 static const TypeInfo alpha_cpu_type_info = {

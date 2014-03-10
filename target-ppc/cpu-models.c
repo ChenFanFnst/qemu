@@ -44,6 +44,7 @@
         PowerPCCPUClass *pcc = POWERPC_CPU_CLASS(oc);                       \
                                                                             \
         pcc->pvr          = _pvr;                                           \
+        pcc->pvr_mask     = CPU_POWERPC_DEFAULT_MASK;                       \
         pcc->svr          = _svr;                                           \
         dc->desc          = _desc;                                          \
     }                                                                       \
@@ -1120,15 +1121,11 @@
 #if defined(TODO)
     POWERPC_DEF("POWER5",        CPU_POWERPC_POWER5,                 POWER5,
                 "POWER5")
-    POWERPC_DEF("POWER5gr",      CPU_POWERPC_POWER5GR,               POWER5,
-                "POWER5GR")
 #endif
-#if defined(TODO)
     POWERPC_DEF("POWER5+",       CPU_POWERPC_POWER5P,                POWER5P,
                 "POWER5+")
-    POWERPC_DEF("POWER5gs",      CPU_POWERPC_POWER5GS,               POWER5P,
-                "POWER5GS")
-#endif
+    POWERPC_DEF("POWER5+_v2.1",  CPU_POWERPC_POWER5P_v21,            POWER5P,
+                "POWER5+ v2.1")
 #if defined(TODO)
     POWERPC_DEF("POWER6",        CPU_POWERPC_POWER6,                 POWER6,
                 "POWER6")
@@ -1143,6 +1140,8 @@
                 "POWER7 v2.1")
     POWERPC_DEF("POWER7_v2.3",   CPU_POWERPC_POWER7_v23,             POWER7,
                 "POWER7 v2.3")
+    POWERPC_DEF("POWER7+_v2.1",  CPU_POWERPC_POWER7P_v21,            POWER7P,
+                "POWER7+ v2.1")
     POWERPC_DEF("POWER8_v1.0",   CPU_POWERPC_POWER8_v10,             POWER8,
                 "POWER8 v1.0")
     POWERPC_DEF("970",           CPU_POWERPC_970,                    970,
@@ -1157,8 +1156,6 @@
                 "PowerPC 970FX v3.0 (G5)")
     POWERPC_DEF("970fx_v3.1",    CPU_POWERPC_970FX_v31,              970FX,
                 "PowerPC 970FX v3.1 (G5)")
-    POWERPC_DEF("970gx",         CPU_POWERPC_970GX,                  970GX,
-                "PowerPC 970GX (G5)")
     POWERPC_DEF("970mp_v1.0",    CPU_POWERPC_970MP_v10,              970MP,
                 "PowerPC 970MP v1.0")
     POWERPC_DEF("970mp_v1.1",    CPU_POWERPC_970MP_v11,              970MP,
@@ -1389,7 +1386,10 @@ PowerPCCPUAlias ppc_cpu_aliases[] = {
     { "Boxer", "POWER3" },
     { "Dino",  "POWER3" },
     { "POWER3+", "631" },
+    { "POWER5gr", "POWER5" },
+    { "POWER5gs", "POWER5+" },
     { "POWER7", "POWER7_v2.3" },
+    { "POWER7+", "POWER7+_v2.1" },
     { "POWER8", "POWER8_v1.0" },
     { "970fx", "970fx_v3.1" },
     { "970mp", "970mp_v1.1" },

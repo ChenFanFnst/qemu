@@ -108,7 +108,8 @@ static int bochs_probe(const uint8_t *buf, int buf_size, const char *filename)
     return 0;
 }
 
-static int bochs_open(BlockDriverState *bs, QDict *options, int flags)
+static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
+                      Error **errp)
 {
     BDRVBochsState *s = bs->opaque;
     int i;
@@ -128,7 +129,8 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags)
         strcmp(bochs.subtype, GROWING_TYPE) ||
 	((le32_to_cpu(bochs.version) != HEADER_VERSION) &&
 	(le32_to_cpu(bochs.version) != HEADER_V1))) {
-        return -EMEDIUMTYPE;
+        error_setg(errp, "Image not in Bochs format");
+        return -EINVAL;
     }
 
     if (le32_to_cpu(bochs.version) == HEADER_V1) {

@@ -20,7 +20,7 @@ int ich9_lpc_map_irq(PCIDevice *pci_dev, int intx);
 PCIINTxRoute ich9_route_intx_pin_to_irq(void *opaque, int pirq_pin);
 void ich9_lpc_pm_init(PCIDevice *pci_lpc);
 PCIBus *ich9_d2pbr_init(PCIBus *bus, int devfn, int sec_bus);
-i2c_bus *ich9_smb_init(PCIBus *bus, int devfn, uint32_t smb_io_base);
+I2CBus *ich9_smb_init(PCIBus *bus, int devfn, uint32_t smb_io_base);
 
 #define ICH9_CC_SIZE                            (16 * 1024)     /* 16KB */
 
@@ -65,6 +65,8 @@ typedef struct ICH9LPCState {
     qemu_irq *pic;
     qemu_irq *ioapic;
 } ICH9LPCState;
+
+Object *ich9_lpc_find(void);
 
 #define Q35_MASK(bit, ms_bit, ls_bit) \
 ((uint##bit##_t)(((1ULL << ((ms_bit) + 1)) - 1) & ~((1ULL << ls_bit) - 1)))

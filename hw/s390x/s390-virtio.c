@@ -36,15 +36,16 @@
 
 #include "hw/s390x/s390-virtio-bus.h"
 #include "hw/s390x/sclp.h"
+#include "hw/s390x/s390_flic.h"
 #include "hw/s390x/s390-virtio.h"
 
 //#define DEBUG_S390
 
 #ifdef DEBUG_S390
-#define dprintf(fmt, ...) \
+#define DPRINTF(fmt, ...) \
     do { fprintf(stderr, fmt, ## __VA_ARGS__); } while (0)
 #else
-#define dprintf(fmt, ...) \
+#define DPRINTF(fmt, ...) \
     do { } while (0)
 #endif
 
@@ -91,7 +92,7 @@ static int s390_virtio_hcall_reset(const uint64_t *args)
         return -EINVAL;
     }
     virtio_reset(dev->vdev);
-    stb_phys(dev->dev_offs + VIRTIO_DEV_OFFS_STATUS, 0);
+    stb_phys(&address_space_memory, dev->dev_offs + VIRTIO_DEV_OFFS_STATUS, 0);
     s390_virtio_device_sync(dev);
     s390_virtio_reset_idx(dev);
 
@@ -251,6 +252,7 @@ static void s390_init(QEMUMachineInitArgs *args)
     s390_sclp_init();
     s390_init_ipl_dev(args->kernel_filename, args->kernel_cmdline,
                       args->initrd_filename, ZIPL_FILENAME);
+    s390_flic_init();
 
     /* register hypercalls */
     s390_virtio_register_hcalls();
@@ -293,7 +295,6 @@ static QEMUMachine s390_machine = {
     .use_virtcon = 1,
     .max_cpus = 255,
     .is_default = 1,
-    DEFAULT_MACHINE_OPTIONS,
 };
 
 static void s390_machine_init(void)

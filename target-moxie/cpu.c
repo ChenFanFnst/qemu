@@ -45,10 +45,11 @@ static void moxie_cpu_reset(CPUState *s)
 
 static void moxie_cpu_realizefn(DeviceState *dev, Error **errp)
 {
-    MoxieCPU *cpu = MOXIE_CPU(dev);
+    CPUState *cs = CPU(dev);
     MoxieCPUClass *mcc = MOXIE_CPU_GET_CLASS(dev);
 
-    cpu_reset(CPU(cpu));
+    qemu_init_vcpu(cs);
+    cpu_reset(cs);
 
     mcc->parent_realize(dev, errp);
 }
@@ -137,7 +138,6 @@ MoxieCPU *cpu_moxie_init(const char *cpu_model)
         return NULL;
     }
     cpu = MOXIE_CPU(object_new(object_class_get_name(oc)));
-    cpu->env.cpu_model_str = cpu_model;
 
     object_property_set_bool(OBJECT(cpu), true, "realized", NULL);
 

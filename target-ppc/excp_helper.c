@@ -180,12 +180,14 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         msr |= env->error_code;
         goto store_next;
     case POWERPC_EXCP_EXTERNAL:  /* External input                           */
+        cs = CPU(cpu);
+
         if (lpes0 == 1) {
             new_msr |= (target_ulong)MSR_HVB;
         }
         if (env->mpic_proxy) {
             /* IACK the IRQ on delivery */
-            env->spr[SPR_BOOKE_EPR] = ldl_phys(env->mpic_iack);
+            env->spr[SPR_BOOKE_EPR] = ldl_phys(cs->as, env->mpic_iack);
         }
         goto store_next;
     case POWERPC_EXCP_ALIGN:     /* Alignment exception                      */
@@ -386,6 +388,11 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         new_msr |= env->msr & ((target_ulong)1 << MSR_RI);
         goto store_next;
     case POWERPC_EXCP_VPU:       /* Vector unavailable exception             */
+        if (lpes1 == 0) {
+            new_msr |= (target_ulong)MSR_HVB;
+        }
+        goto store_current;
+    case POWERPC_EXCP_VSXU:       /* VSX unavailable exception               */
         if (lpes1 == 0) {
             new_msr |= (target_ulong)MSR_HVB;
         }
@@ -611,9 +618,19 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         tlb_flush(env, 1);
     }
 
+#ifdef TARGET_PPC64
+    if (excp_model == POWERPC_EXCP_POWER7) {
+        if (env->spr[SPR_LPCR] & LPCR_ILE) {
+            new_msr |= (target_ulong)1 << MSR_LE;
+        }
+    } else if (msr_ile) {
+        new_msr |= (target_ulong)1 << MSR_LE;
+    }
+#else
     if (msr_ile) {
         new_msr |= (target_ulong)1 << MSR_LE;
     }
+#endif
 
     /* Jump to handler */
     vector = env->excp_vectors[excp];
@@ -992,7 +1009,7 @@ void helper_msgsnd(target_ulong rb)
         return;
     }
 
-    for (cs = first_cpu; cs != NULL; cs = cs->next_cpu) {
+    CPU_FOREACH(cs) {
         PowerPCCPU *cpu = POWERPC_CPU(cs);
         CPUPPCState *cenv = &cpu->env;
 

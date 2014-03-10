@@ -21,6 +21,7 @@
 
 #include "qemu-common.h"
 #include "exec/cpu-common.h"
+#include "exec/memory.h"
 #include "qemu/thread.h"
 #include "qom/cpu.h"
 
@@ -210,11 +211,15 @@ extern unsigned long reserved_va;
 })
 #endif
 
-#define h2g(x) ({ \
+#define h2g_nocheck(x) ({ \
     unsigned long __ret = (unsigned long)(x) - GUEST_BASE; \
+    (abi_ulong)__ret; \
+})
+
+#define h2g(x) ({ \
     /* Check if given address fits target address space */ \
     assert(h2g_valid(x)); \
-    (abi_ulong)__ret; \
+    h2g_nocheck(x); \
 })
 
 #define saddr(x) g2h(x)
@@ -449,15 +454,13 @@ typedef struct RAMBlock {
      * Writes must take both locks.
      */
     QTAILQ_ENTRY(RAMBlock) next;
-#if defined(__linux__) && !defined(TARGET_S390X)
     int fd;
-#endif
 } RAMBlock;
 
 typedef struct RAMList {
     QemuMutex mutex;
     /* Protected by the iothread lock.  */
-    uint8_t *phys_dirty;
+    unsigned long *dirty_memory[DIRTY_MEMORY_NUM];
     RAMBlock *mru_block;
     /* Protected by the ramlist lock.  */
     QTAILQ_HEAD(, RAMBlock) blocks;

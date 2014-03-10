@@ -280,12 +280,12 @@ static void update_sr (AC97LinkState *s, AC97BusMasterRegs *r, uint32_t new_sr)
     if (level) {
         s->glob_sta |= masks[r - s->bm_regs];
         dolog ("set irq level=1\n");
-        qemu_set_irq (s->dev.irq[0], 1);
+        pci_irq_assert(&s->dev);
     }
     else {
         s->glob_sta &= ~masks[r - s->bm_regs];
         dolog ("set irq level=0\n");
-        qemu_set_irq (s->dev.irq[0], 0);
+        pci_irq_deassert(&s->dev);
     }
 }
 
@@ -1420,6 +1420,7 @@ static void ac97_class_init (ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_INTEL_82801AA_5;
     k->revision = 0x01;
     k->class_id = PCI_CLASS_MULTIMEDIA_AUDIO;
+    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "Intel 82801AA AC97 Audio";
     dc->vmsd = &vmstate_ac97;
     dc->props = ac97_properties;

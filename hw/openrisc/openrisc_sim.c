@@ -82,13 +82,12 @@ static void cpu_openrisc_load_kernel(ram_addr_t ram_size,
         }
 
         if (kernel_size < 0) {
-            qemu_log("QEMU: couldn't load the kernel '%s'\n",
+            fprintf(stderr, "QEMU: couldn't load the kernel '%s'\n",
                     kernel_filename);
             exit(1);
         }
+        cpu->env.pc = entry;
     }
-
-    cpu->env.pc = entry;
 }
 
 static void openrisc_sim_init(QEMUMachineInitArgs *args)
@@ -96,7 +95,7 @@ static void openrisc_sim_init(QEMUMachineInitArgs *args)
     ram_addr_t ram_size = args->ram_size;
     const char *cpu_model = args->cpu_model;
     const char *kernel_filename = args->kernel_filename;
-   OpenRISCCPU *cpu = NULL;
+    OpenRISCCPU *cpu = NULL;
     MemoryRegion *ram;
     int n;
 
@@ -107,7 +106,7 @@ static void openrisc_sim_init(QEMUMachineInitArgs *args)
     for (n = 0; n < smp_cpus; n++) {
         cpu = cpu_openrisc_init(cpu_model);
         if (cpu == NULL) {
-            qemu_log("Unable to find CPU definition!\n");
+            fprintf(stderr, "Unable to find CPU definition!\n");
             exit(1);
         }
         qemu_register_reset(main_cpu_reset, cpu);
@@ -139,7 +138,6 @@ static QEMUMachine openrisc_sim_machine = {
     .init = openrisc_sim_init,
     .max_cpus = 1,
     .is_default = 1,
-    DEFAULT_MACHINE_OPTIONS,
 };
 
 static void openrisc_sim_machine_init(void)

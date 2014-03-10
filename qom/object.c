@@ -51,6 +51,7 @@ struct TypeImpl
     void *class_data;
 
     void (*instance_init)(Object *obj);
+    void (*instance_post_init)(Object *obj);
     void (*instance_finalize)(Object *obj);
 
     bool abstract;
@@ -77,8 +78,11 @@ static GHashTable *type_table_get(void)
     return type_table;
 }
 
+static bool enumerating_types;
+
 static void type_table_add(TypeImpl *ti)
 {
+    assert(!enumerating_types);
     g_hash_table_insert(type_table_get(), (void *)ti->name, ti);
 }
 
@@ -87,7 +91,7 @@ static TypeImpl *type_table_lookup(const char *name)
     return g_hash_table_lookup(type_table_get(), name);
 }
 
-static TypeImpl *type_register_internal(const TypeInfo *info)
+static TypeImpl *type_new(const TypeInfo *info)
 {
     TypeImpl *ti = g_malloc0(sizeof(*ti));
     int i;
@@ -111,6 +115,7 @@ static TypeImpl *type_register_internal(const TypeInfo *info)
     ti->class_data = info->class_data;
 
     ti->instance_init = info->instance_init;
+    ti->instance_post_init = info->instance_post_init;
     ti->instance_finalize = info->instance_finalize;
 
     ti->abstract = info->abstract;
@@ -120,8 +125,15 @@ static TypeImpl *type_register_internal(const TypeInfo *info)
     }
     ti->num_interfaces = i;
 
-    type_table_add(ti);
+    return ti;
+}
 
+static TypeImpl *type_register_internal(const TypeInfo *info)
+{
+    TypeImpl *ti;
+    ti = type_new(info);
+
+    type_table_add(ti);
     return ti;
 }
 
@@ -204,22 +216,25 @@ static bool type_is_ancestor(TypeImpl *type, TypeImpl *target_type)
 
 static void type_initialize(TypeImpl *ti);
 
-static void type_initialize_interface(TypeImpl *ti, const char *parent)
+static void type_initialize_interface(TypeImpl *ti, TypeImpl *interface_type,
+                                      TypeImpl *parent_type)
 {
     InterfaceClass *new_iface;
     TypeInfo info = { };
     TypeImpl *iface_impl;
 
-    info.parent = parent;
-    info.name = g_strdup_printf("%s::%s", ti->name, info.parent);
+    info.parent = parent_type->name;
+    info.name = g_strdup_printf("%s::%s", ti->name, interface_type->name);
     info.abstract = true;
 
-    iface_impl = type_register(&info);
+    iface_impl = type_new(&info);
+    iface_impl->parent_type = parent_type;
     type_initialize(iface_impl);
     g_free((char *)info.name);
 
     new_iface = (InterfaceClass *)iface_impl->class;
     new_iface->concrete_class = ti->class;
+    new_iface->interface_type = interface_type;
 
     ti->class->interfaces = g_slist_append(ti->class->interfaces,
                                            iface_impl->class);
@@ -249,8 +264,10 @@ static void type_initialize(TypeImpl *ti)
         ti->class->interfaces = NULL;
 
         for (e = parent->class->interfaces; e; e = e->next) {
-            ObjectClass *iface = e->data;
-            type_initialize_interface(ti, object_class_get_name(iface));
+            InterfaceClass *iface = e->data;
+            ObjectClass *klass = OBJECT_CLASS(iface);
+
+            type_initialize_interface(ti, iface->interface_type, klass->type);
         }
 
         for (i = 0; i < ti->num_interfaces; i++) {
@@ -267,7 +284,7 @@ static void type_initialize(TypeImpl *ti)
                 continue;
             }
 
-            type_initialize_interface(ti, ti->interfaces[i].typename);
+            type_initialize_interface(ti, t, t);
         }
     }
 
@@ -283,8 +300,6 @@ static void type_initialize(TypeImpl *ti)
     if (ti->class_init) {
         ti->class_init(ti->class, ti->class_data);
     }
-
-
 }
 
 static void object_init_with_type(Object *obj, TypeImpl *ti)
@@ -298,7 +313,18 @@ static void object_init_with_type(Object *obj, TypeImpl *ti)
     }
 }
 
-void object_initialize_with_type(void *data, TypeImpl *type)
+static void object_post_init_with_type(Object *obj, TypeImpl *ti)
+{
+    if (ti->instance_post_init) {
+        ti->instance_post_init(obj);
+    }
+
+    if (type_has_parent(ti)) {
+        object_post_init_with_type(obj, type_get_parent(ti));
+    }
+}
+
+void object_initialize_with_type(void *data, size_t size, TypeImpl *type)
 {
     Object *obj = data;
 
@@ -307,19 +333,21 @@ void object_initialize_with_type(void *data, TypeImpl *type)
 
     g_assert(type->instance_size >= sizeof(Object));
     g_assert(type->abstract == false);
+    g_assert(size >= type->instance_size);
 
     memset(obj, 0, type->instance_size);
     obj->class = type->class;
     object_ref(obj);
     QTAILQ_INIT(&obj->properties);
     object_init_with_type(obj, type);
+    object_post_init_with_type(obj, type);
 }
 
-void object_initialize(void *data, const char *typename)
+void object_initialize(void *data, size_t size, const char *typename)
 {
     TypeImpl *type = type_get_by_name(typename);
 
-    object_initialize_with_type(data, type);
+    object_initialize_with_type(data, size, type);
 }
 
 static inline bool object_property_is_child(ObjectProperty *prop)
@@ -410,7 +438,7 @@ Object *object_new_with_type(Type type)
     type_initialize(type);
 
     obj = g_malloc(type->instance_size);
-    object_initialize_with_type(obj, type);
+    object_initialize_with_type(obj, type->instance_size, type);
     obj->free = g_free;
 
     return obj;
@@ -443,7 +471,7 @@ Object *object_dynamic_cast_assert(Object *obj, const char *typename,
     Object *inst;
 
     for (i = 0; obj && i < OBJECT_CLASS_CAST_CACHE; i++) {
-        if (obj->class->cast_cache[i] == typename) {
+        if (obj->class->object_cast_cache[i] == typename) {
             goto out;
         }
     }
@@ -460,9 +488,10 @@ Object *object_dynamic_cast_assert(Object *obj, const char *typename,
 
     if (obj && obj == inst) {
         for (i = 1; i < OBJECT_CLASS_CAST_CACHE; i++) {
-            obj->class->cast_cache[i - 1] = obj->class->cast_cache[i];
+            obj->class->object_cast_cache[i - 1] =
+                    obj->class->object_cast_cache[i];
         }
-        obj->class->cast_cache[i - 1] = typename;
+        obj->class->object_cast_cache[i - 1] = typename;
     }
 
 out:
@@ -532,7 +561,7 @@ ObjectClass *object_class_dynamic_cast_assert(ObjectClass *class,
     int i;
 
     for (i = 0; class && i < OBJECT_CLASS_CAST_CACHE; i++) {
-        if (class->cast_cache[i] == typename) {
+        if (class->class_cast_cache[i] == typename) {
             ret = class;
             goto out;
         }
@@ -553,9 +582,9 @@ ObjectClass *object_class_dynamic_cast_assert(ObjectClass *class,
 #ifdef CONFIG_QOM_CAST_DEBUG
     if (class && ret == class) {
         for (i = 1; i < OBJECT_CLASS_CAST_CACHE; i++) {
-            class->cast_cache[i - 1] = class->cast_cache[i];
+            class->class_cast_cache[i - 1] = class->class_cast_cache[i];
         }
-        class->cast_cache[i - 1] = typename;
+        class->class_cast_cache[i - 1] = typename;
     }
 out:
 #endif
@@ -644,7 +673,9 @@ void object_class_foreach(void (*fn)(ObjectClass *klass, void *opaque),
 {
     OCFData data = { fn, implements_type, include_abstract, opaque };
 
+    enumerating_types = true;
     g_hash_table_foreach(type_table_get(), object_class_foreach_tramp, &data);
+    enumerating_types = false;
 }
 
 int object_child_foreach(Object *obj, int (*fn)(Object *child, void *opaque),
@@ -823,8 +854,9 @@ char *object_property_get_str(Object *obj, const char *name,
 void object_property_set_link(Object *obj, Object *value,
                               const char *name, Error **errp)
 {
-    object_property_set_str(obj, object_get_canonical_path(value),
-                            name, errp);
+    gchar *path = object_get_canonical_path(value);
+    object_property_set_str(obj, path, name, errp);
+    g_free(path);
 }
 
 Object *object_property_get_link(Object *obj, const char *name,
@@ -916,13 +948,13 @@ void object_property_parse(Object *obj, const char *string,
     string_input_visitor_cleanup(mi);
 }
 
-char *object_property_print(Object *obj, const char *name,
+char *object_property_print(Object *obj, const char *name, bool human,
                             Error **errp)
 {
     StringOutputVisitor *mo;
     char *string;
 
-    mo = string_output_visitor_new();
+    mo = string_output_visitor_new(human);
     object_property_get(obj, string_output_get_visitor(mo), name, errp);
     string = string_output_get_string(mo);
     string_output_visitor_cleanup(mo);
@@ -972,17 +1004,22 @@ static void object_finalize_child_property(Object *obj, const char *name,
 void object_property_add_child(Object *obj, const char *name,
                                Object *child, Error **errp)
 {
+    Error *local_err = NULL;
     gchar *type;
 
     type = g_strdup_printf("child<%s>", object_get_typename(OBJECT(child)));
 
-    object_property_add(obj, name, type, object_get_child_property,
-                        NULL, object_finalize_child_property, child, errp);
-
+    object_property_add(obj, name, type, object_get_child_property, NULL,
+                        object_finalize_child_property, child, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        goto out;
+    }
     object_ref(child);
     g_assert(child->parent == NULL);
     child->parent = obj;
 
+out:
     g_free(type);
 }
 
@@ -1327,6 +1364,66 @@ void object_property_add_bool(Object *obj, const char *name,
 static char *qdev_get_type(Object *obj, Error **errp)
 {
     return g_strdup(object_get_typename(obj));
+}
+
+static void property_get_uint8_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint8_t value = *(uint8_t *)opaque;
+    visit_type_uint8(v, &value, name, errp);
+}
+
+static void property_get_uint16_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint16_t value = *(uint16_t *)opaque;
+    visit_type_uint16(v, &value, name, errp);
+}
+
+static void property_get_uint32_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint32_t value = *(uint32_t *)opaque;
+    visit_type_uint32(v, &value, name, errp);
+}
+
+static void property_get_uint64_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint64_t value = *(uint64_t *)opaque;
+    visit_type_uint64(v, &value, name, errp);
+}
+
+void object_property_add_uint8_ptr(Object *obj, const char *name,
+                                   const uint8_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint8", property_get_uint8_ptr,
+                        NULL, NULL, (void *)v, errp);
+}
+
+void object_property_add_uint16_ptr(Object *obj, const char *name,
+                                    const uint16_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint16", property_get_uint16_ptr,
+                        NULL, NULL, (void *)v, errp);
+}
+
+void object_property_add_uint32_ptr(Object *obj, const char *name,
+                                    const uint32_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint32", property_get_uint32_ptr,
+                        NULL, NULL, (void *)v, errp);
+}
+
+void object_property_add_uint64_ptr(Object *obj, const char *name,
+                                    const uint64_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint64", property_get_uint64_ptr,
+                        NULL, NULL, (void *)v, errp);
 }
 
 static void object_instance_init(Object *obj)

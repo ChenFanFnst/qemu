@@ -361,9 +361,9 @@ static int esp_pci_scsi_init(PCIDevice *dev)
                           "esp-io", 0x80);
 
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &pci->io);
-    s->irq = dev->irq[0];
+    s->irq = pci_allocate_irq(dev);
 
-    scsi_bus_new(&s->bus, d, &esp_pci_scsi_info, NULL);
+    scsi_bus_new(&s->bus, sizeof(s->bus), d, &esp_pci_scsi_info, NULL);
     if (!d->hotplugged) {
         scsi_bus_legacy_handle_cmdline(&s->bus, &err);
         if (err != NULL) {
@@ -378,6 +378,7 @@ static void esp_pci_scsi_uninit(PCIDevice *d)
 {
     PCIESPState *pci = PCI_ESP(d);
 
+    qemu_free_irq(pci->esp.irq);
     memory_region_destroy(&pci->io);
 }
 
@@ -392,6 +393,7 @@ static void esp_pci_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_AMD_SCSI;
     k->revision = 0x10;
     k->class_id = PCI_CLASS_STORAGE_SCSI;
+    set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->desc = "AMD Am53c974 PCscsi-PCI SCSI adapter";
     dc->reset = esp_pci_hard_reset;
     dc->vmsd = &vmstate_esp_pci_scsi;
@@ -512,6 +514,7 @@ static void dc390_class_init(ObjectClass *klass, void *data)
     k->init = dc390_scsi_init;
     k->config_read = dc390_read_config;
     k->config_write = dc390_write_config;
+    set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     dc->desc = "Tekram DC-390 SCSI adapter";
 }
 

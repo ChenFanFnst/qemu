@@ -147,11 +147,12 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
     const char *kernel_filename = args->kernel_filename;
     const char *kernel_cmdline = args->kernel_cmdline;
     const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_device;
+    const char *boot_device = args->boot_order;
     PowerPCCPU *cpu = NULL;
     CPUPPCState *env = NULL;
     char *filename;
     qemu_irq *pic, **openpic_irqs;
+    MemoryRegion *isa = g_new(MemoryRegion, 1);
     MemoryRegion *unin_memory = g_new(MemoryRegion, 1);
     MemoryRegion *unin2_memory = g_new(MemoryRegion, 1);
     int linux_boot, i, j, k;
@@ -288,7 +289,9 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
     }
 
     /* Register 8 MB of ISA IO space */
-    isa_mmio_init(0xf2000000, 0x00800000);
+    memory_region_init_alias(isa, NULL, "isa_mmio",
+                             get_system_io(), 0, 0x00800000);
+    memory_region_add_subregion(get_system_memory(), 0xf2000000, isa);
 
     /* UniN init: XXX should be a real device */
     memory_region_init_io(unin_memory, NULL, &unin_ops, token, "unin", 0x1000);
@@ -474,7 +477,7 @@ static QEMUMachine core99_machine = {
     .desc = "Mac99 based PowerMAC",
     .init = ppc_core99_init,
     .max_cpus = MAX_CPUS,
-    DEFAULT_MACHINE_OPTIONS,
+    .default_boot_order = "cd",
 };
 
 static void core99_machine_init(void)

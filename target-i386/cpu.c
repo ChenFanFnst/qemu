@@ -35,8 +35,6 @@
 #include "qapi/visitor.h"
 #include "sysemu/arch_init.h"
 
-#include "hyperv.h"
-
 #include "hw/hw.h"
 #if defined(CONFIG_KVM)
 #include <linux/kvm_para.h>
@@ -49,6 +47,118 @@
 #include "hw/xen/xen.h"
 #include "hw/i386/apic_internal.h"
 #endif
+
+
+/* Cache topology CPUID constants: */
+
+/* CPUID Leaf 2 Descriptors */
+
+#define CPUID_2_L1D_32KB_8WAY_64B 0x2c
+#define CPUID_2_L1I_32KB_8WAY_64B 0x30
+#define CPUID_2_L2_2MB_8WAY_64B   0x7d
+
+
+/* CPUID Leaf 4 constants: */
+
+/* EAX: */
+#define CPUID_4_TYPE_DCACHE  1
+#define CPUID_4_TYPE_ICACHE  2
+#define CPUID_4_TYPE_UNIFIED 3
+
+#define CPUID_4_LEVEL(l)          ((l) << 5)
+
+#define CPUID_4_SELF_INIT_LEVEL (1 << 8)
+#define CPUID_4_FULLY_ASSOC     (1 << 9)
+
+/* EDX: */
+#define CPUID_4_NO_INVD_SHARING (1 << 0)
+#define CPUID_4_INCLUSIVE       (1 << 1)
+#define CPUID_4_COMPLEX_IDX     (1 << 2)
+
+#define ASSOC_FULL 0xFF
+
+/* AMD associativity encoding used on CPUID Leaf 0x80000006: */
+#define AMD_ENC_ASSOC(a) (a <=   1 ? a   : \
+                          a ==   2 ? 0x2 : \
+                          a ==   4 ? 0x4 : \
+                          a ==   8 ? 0x6 : \
+                          a ==  16 ? 0x8 : \
+                          a ==  32 ? 0xA : \
+                          a ==  48 ? 0xB : \
+                          a ==  64 ? 0xC : \
+                          a ==  96 ? 0xD : \
+                          a == 128 ? 0xE : \
+                          a == ASSOC_FULL ? 0xF : \
+                          0 /* invalid value */)
+
+
+/* Definitions of the hardcoded cache entries we expose: */
+
+/* L1 data cache: */
+#define L1D_LINE_SIZE         64
+#define L1D_ASSOCIATIVITY      8
+#define L1D_SETS              64
+#define L1D_PARTITIONS         1
+/* Size = LINE_SIZE*ASSOCIATIVITY*SETS*PARTITIONS = 32KiB */
+#define L1D_DESCRIPTOR CPUID_2_L1D_32KB_8WAY_64B
+/*FIXME: CPUID leaf 0x80000005 is inconsistent with leaves 2 & 4 */
+#define L1D_LINES_PER_TAG      1
+#define L1D_SIZE_KB_AMD       64
+#define L1D_ASSOCIATIVITY_AMD  2
+
+/* L1 instruction cache: */
+#define L1I_LINE_SIZE         64
+#define L1I_ASSOCIATIVITY      8
+#define L1I_SETS              64
+#define L1I_PARTITIONS         1
+/* Size = LINE_SIZE*ASSOCIATIVITY*SETS*PARTITIONS = 32KiB */
+#define L1I_DESCRIPTOR CPUID_2_L1I_32KB_8WAY_64B
+/*FIXME: CPUID leaf 0x80000005 is inconsistent with leaves 2 & 4 */
+#define L1I_LINES_PER_TAG      1
+#define L1I_SIZE_KB_AMD       64
+#define L1I_ASSOCIATIVITY_AMD  2
+
+/* Level 2 unified cache: */
+#define L2_LINE_SIZE          64
+#define L2_ASSOCIATIVITY      16
+#define L2_SETS             4096
+#define L2_PARTITIONS          1
+/* Size = LINE_SIZE*ASSOCIATIVITY*SETS*PARTITIONS = 4MiB */
+/*FIXME: CPUID leaf 2 descriptor is inconsistent with CPUID leaf 4 */
+#define L2_DESCRIPTOR CPUID_2_L2_2MB_8WAY_64B
+/*FIXME: CPUID leaf 0x80000006 is inconsistent with leaves 2 & 4 */
+#define L2_LINES_PER_TAG       1
+#define L2_SIZE_KB_AMD       512
+
+/* No L3 cache: */
+#define L3_SIZE_KB             0 /* disabled */
+#define L3_ASSOCIATIVITY       0 /* disabled */
+#define L3_LINES_PER_TAG       0 /* disabled */
+#define L3_LINE_SIZE           0 /* disabled */
+
+/* TLB definitions: */
+
+#define L1_DTLB_2M_ASSOC       1
+#define L1_DTLB_2M_ENTRIES   255
+#define L1_DTLB_4K_ASSOC       1
+#define L1_DTLB_4K_ENTRIES   255
+
+#define L1_ITLB_2M_ASSOC       1
+#define L1_ITLB_2M_ENTRIES   255
+#define L1_ITLB_4K_ASSOC       1
+#define L1_ITLB_4K_ENTRIES   255
+
+#define L2_DTLB_2M_ASSOC       0 /* disabled */
+#define L2_DTLB_2M_ENTRIES     0 /* disabled */
+#define L2_DTLB_4K_ASSOC       4
+#define L2_DTLB_4K_ENTRIES   512
+
+#define L2_ITLB_2M_ASSOC       0 /* disabled */
+#define L2_ITLB_2M_ENTRIES     0 /* disabled */
+#define L2_ITLB_4K_ASSOC       4
+#define L2_ITLB_4K_ENTRIES   512
+
+
 
 static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
                                      uint32_t vendor2, uint32_t vendor3)
@@ -125,7 +235,7 @@ static const char *ext4_feature_name[] = {
 
 static const char *kvm_feature_name[] = {
     "kvmclock", "kvm_nopiodelay", "kvm_mmu", "kvmclock",
-    "kvm_asyncpf", "kvm_steal_time", "kvm_pv_eoi", NULL,
+    "kvm_asyncpf", "kvm_steal_time", "kvm_pv_eoi", "kvm_pv_unhalt",
     NULL, NULL, NULL, NULL,
     NULL, NULL, NULL, NULL,
     NULL, NULL, NULL, NULL,
@@ -218,6 +328,19 @@ X86RegisterInfo32 x86_reg_info_32[CPU_NB_REGS32] = {
 };
 #undef REGISTER
 
+typedef struct ExtSaveArea {
+    uint32_t feature, bits;
+    uint32_t offset, size;
+} ExtSaveArea;
+
+static const ExtSaveArea ext_save_areas[] = {
+    [2] = { .feature = FEAT_1_ECX, .bits = CPUID_EXT_AVX,
+            .offset = 0x240, .size = 0x100 },
+    [3] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_MPX,
+            .offset = 0x3c0, .size = 0x40  },
+    [4] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_MPX,
+            .offset = 0x400, .size = 0x10  },
+};
 
 const char *get_register_name_32(unsigned int reg)
 {
@@ -235,9 +358,6 @@ typedef struct model_features_t {
     FeatureWord feat_word;
 } model_features_t;
 
-int check_cpuid = 0;
-int enforce_cpuid = 0;
-
 static uint32_t kvm_default_features = (1 << KVM_FEATURE_CLOCKSOURCE) |
         (1 << KVM_FEATURE_NOP_IO_DELAY) |
         (1 << KVM_FEATURE_CLOCKSOURCE2) |
@@ -254,7 +374,6 @@ void disable_kvm_pv_eoi(void)
 void host_cpuid(uint32_t function, uint32_t count,
                 uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
-#if defined(CONFIG_KVM)
     uint32_t vec[4];
 
 #ifdef __x86_64__
@@ -262,7 +381,7 @@ void host_cpuid(uint32_t function, uint32_t count,
                  : "=a"(vec[0]), "=b"(vec[1]),
                    "=c"(vec[2]), "=d"(vec[3])
                  : "0"(function), "c"(count) : "cc");
-#else
+#elif defined(__i386__)
     asm volatile("pusha \n\t"
                  "cpuid \n\t"
                  "mov %%eax, 0(%2) \n\t"
@@ -272,6 +391,8 @@ void host_cpuid(uint32_t function, uint32_t count,
                  "popa"
                  : : "a"(function), "c"(count), "S"(vec)
                  : "memory", "cc");
+#else
+    abort();
 #endif
 
     if (eax)
@@ -282,7 +403,6 @@ void host_cpuid(uint32_t function, uint32_t count,
         *ecx = vec[2];
     if (edx)
         *edx = vec[3];
-#endif
 }
 
 #define iswhite(c) ((c) && ((c) <= ' ' || '~' < (c)))
@@ -376,6 +496,7 @@ typedef struct x86_def_t {
     int stepping;
     FeatureWordArray features;
     char model_id[48];
+    bool cache_info_passthrough;
 } x86_def_t;
 
 #define I486_FEATURES (CPUID_FP87 | CPUID_VME | CPUID_PSE)
@@ -434,7 +555,7 @@ static x86_def_t builtin_x86_defs[] = {
         .level = 4,
         .vendor = CPUID_VENDOR_AMD,
         .family = 6,
-        .model = 2,
+        .model = 6,
         .stepping = 3,
         .features[FEAT_1_EDX] =
             PPRO_FEATURES |
@@ -537,7 +658,7 @@ static x86_def_t builtin_x86_defs[] = {
         .level = 4,
         .vendor = CPUID_VENDOR_INTEL,
         .family = 6,
-        .model = 3,
+        .model = 6,
         .stepping = 3,
         .features[FEAT_1_EDX] =
             PPRO_FEATURES,
@@ -998,7 +1119,6 @@ void x86_cpu_compat_set_features(const char *cpu_model, FeatureWord w,
     }
 }
 
-#ifdef CONFIG_KVM
 static int cpu_x86_fill_model_id(char *str)
 {
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
@@ -1013,7 +1133,6 @@ static int cpu_x86_fill_model_id(char *str)
     }
     return 0;
 }
-#endif
 
 /* Fill a x86_def_t struct with information about the host CPU, and
  * the CPU features supported by the host hardware + host kernel
@@ -1022,13 +1141,13 @@ static int cpu_x86_fill_model_id(char *str)
  */
 static void kvm_cpu_fill_host(x86_def_t *x86_cpu_def)
 {
-#ifdef CONFIG_KVM
     KVMState *s = kvm_state;
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
 
     assert(kvm_enabled());
 
     x86_cpu_def->name = "host";
+    x86_cpu_def->cache_info_passthrough = true;
     host_cpuid(0x0, 0, &eax, &ebx, &ecx, &edx);
     x86_cpu_vendor_words2str(x86_cpu_def->vendor, ebx, edx, ecx);
 
@@ -1038,46 +1157,19 @@ static void kvm_cpu_fill_host(x86_def_t *x86_cpu_def)
     x86_cpu_def->stepping = eax & 0x0F;
 
     x86_cpu_def->level = kvm_arch_get_supported_cpuid(s, 0x0, 0, R_EAX);
-    x86_cpu_def->features[FEAT_1_EDX] =
-        kvm_arch_get_supported_cpuid(s, 0x1, 0, R_EDX);
-    x86_cpu_def->features[FEAT_1_ECX] =
-        kvm_arch_get_supported_cpuid(s, 0x1, 0, R_ECX);
-
-    if (x86_cpu_def->level >= 7) {
-        x86_cpu_def->features[FEAT_7_0_EBX] =
-                    kvm_arch_get_supported_cpuid(s, 0x7, 0, R_EBX);
-    } else {
-        x86_cpu_def->features[FEAT_7_0_EBX] = 0;
-    }
-
     x86_cpu_def->xlevel = kvm_arch_get_supported_cpuid(s, 0x80000000, 0, R_EAX);
-    x86_cpu_def->features[FEAT_8000_0001_EDX] =
-                kvm_arch_get_supported_cpuid(s, 0x80000001, 0, R_EDX);
-    x86_cpu_def->features[FEAT_8000_0001_ECX] =
-                kvm_arch_get_supported_cpuid(s, 0x80000001, 0, R_ECX);
+    x86_cpu_def->xlevel2 =
+        kvm_arch_get_supported_cpuid(s, 0xC0000000, 0, R_EAX);
 
     cpu_x86_fill_model_id(x86_cpu_def->model_id);
 
-    /* Call Centaur's CPUID instruction. */
-    if (!strcmp(x86_cpu_def->vendor, CPUID_VENDOR_VIA)) {
-        host_cpuid(0xC0000000, 0, &eax, &ebx, &ecx, &edx);
-        eax = kvm_arch_get_supported_cpuid(s, 0xC0000000, 0, R_EAX);
-        if (eax >= 0xC0000001) {
-            /* Support VIA max extended level */
-            x86_cpu_def->xlevel2 = eax;
-            host_cpuid(0xC0000001, 0, &eax, &ebx, &ecx, &edx);
-            x86_cpu_def->features[FEAT_C000_0001_EDX] =
-                    kvm_arch_get_supported_cpuid(s, 0xC0000001, 0, R_EDX);
-        }
+    FeatureWord w;
+    for (w = 0; w < FEATURE_WORDS; w++) {
+        FeatureWordInfo *wi = &feature_word_info[w];
+        x86_cpu_def->features[w] =
+            kvm_arch_get_supported_cpuid(s, wi->cpuid_eax, wi->cpuid_ecx,
+                                         wi->cpuid_reg);
     }
-
-    /* Other KVM-specific feature fields: */
-    x86_cpu_def->features[FEAT_SVM] =
-        kvm_arch_get_supported_cpuid(s, 0x8000000A, 0, R_EDX);
-    x86_cpu_def->features[FEAT_KVM] =
-        kvm_arch_get_supported_cpuid(s, KVM_CPUID_FEATURES, 0, R_EAX);
-
-#endif /* CONFIG_KVM */
 }
 
 static int unavailable_host_feature(FeatureWordInfo *f, uint32_t mask)
@@ -1104,48 +1196,23 @@ static int unavailable_host_feature(FeatureWordInfo *f, uint32_t mask)
  *
  * This function may be called only if KVM is enabled.
  */
-static int kvm_check_features_against_host(X86CPU *cpu)
+static int kvm_check_features_against_host(KVMState *s, X86CPU *cpu)
 {
     CPUX86State *env = &cpu->env;
-    x86_def_t host_def;
-    uint32_t mask;
-    int rv, i;
-    struct model_features_t ft[] = {
-        {&env->features[FEAT_1_EDX],
-            &host_def.features[FEAT_1_EDX],
-            FEAT_1_EDX },
-        {&env->features[FEAT_1_ECX],
-            &host_def.features[FEAT_1_ECX],
-            FEAT_1_ECX },
-        {&env->features[FEAT_8000_0001_EDX],
-            &host_def.features[FEAT_8000_0001_EDX],
-            FEAT_8000_0001_EDX },
-        {&env->features[FEAT_8000_0001_ECX],
-            &host_def.features[FEAT_8000_0001_ECX],
-            FEAT_8000_0001_ECX },
-        {&env->features[FEAT_C000_0001_EDX],
-            &host_def.features[FEAT_C000_0001_EDX],
-            FEAT_C000_0001_EDX },
-        {&env->features[FEAT_7_0_EBX],
-            &host_def.features[FEAT_7_0_EBX],
-            FEAT_7_0_EBX },
-        {&env->features[FEAT_SVM],
-            &host_def.features[FEAT_SVM],
-            FEAT_SVM },
-        {&env->features[FEAT_KVM],
-            &host_def.features[FEAT_KVM],
-            FEAT_KVM },
-    };
+    int rv = 0;
+    FeatureWord w;
 
     assert(kvm_enabled());
 
-    kvm_cpu_fill_host(&host_def);
-    for (rv = 0, i = 0; i < ARRAY_SIZE(ft); ++i) {
-        FeatureWord w = ft[i].feat_word;
+    for (w = 0; w < FEATURE_WORDS; w++) {
         FeatureWordInfo *wi = &feature_word_info[w];
+        uint32_t guest_feat = env->features[w];
+        uint32_t host_feat = kvm_arch_get_supported_cpuid(s, wi->cpuid_eax,
+                                                             wi->cpuid_ecx,
+                                                             wi->cpuid_reg);
+        uint32_t mask;
         for (mask = 1; mask; mask <<= 1) {
-            if (*ft[i].guest_feat & mask &&
-                !(*ft[i].host_feat & mask)) {
+            if (guest_feat & mask && !(host_feat & mask)) {
                 unavailable_host_feature(wi, mask);
                 rv = 1;
             }
@@ -1475,7 +1542,48 @@ static void x86_cpu_get_feature_words(Object *obj, Visitor *v, void *opaque,
     error_propagate(errp, err);
 }
 
-static int cpu_x86_find_by_name(x86_def_t *x86_cpu_def, const char *name)
+static void x86_get_hv_spinlocks(Object *obj, Visitor *v, void *opaque,
+                                 const char *name, Error **errp)
+{
+    X86CPU *cpu = X86_CPU(obj);
+    int64_t value = cpu->hyperv_spinlock_attempts;
+
+    visit_type_int(v, &value, name, errp);
+}
+
+static void x86_set_hv_spinlocks(Object *obj, Visitor *v, void *opaque,
+                                 const char *name, Error **errp)
+{
+    const int64_t min = 0xFFF;
+    const int64_t max = UINT_MAX;
+    X86CPU *cpu = X86_CPU(obj);
+    Error *err = NULL;
+    int64_t value;
+
+    visit_type_int(v, &value, name, &err);
+    if (err) {
+        error_propagate(errp, err);
+        return;
+    }
+
+    if (value < min || value > max) {
+        error_setg(errp, "Property %s.%s doesn't take value %" PRId64
+                  " (minimum: %" PRId64 ", maximum: %" PRId64 ")",
+                  object_get_typename(obj), name ? name : "null",
+                  value, min, max);
+        return;
+    }
+    cpu->hyperv_spinlock_attempts = value;
+}
+
+static PropertyInfo qdev_prop_spinlocks = {
+    .name  = "int",
+    .get   = x86_get_hv_spinlocks,
+    .set   = x86_set_hv_spinlocks,
+};
+
+static int cpu_x86_find_by_name(X86CPU *cpu, x86_def_t *x86_cpu_def,
+                                const char *name)
 {
     x86_def_t *def;
     int i;
@@ -1485,6 +1593,7 @@ static int cpu_x86_find_by_name(x86_def_t *x86_cpu_def, const char *name)
     }
     if (kvm_enabled() && strcmp(name, "host") == 0) {
         kvm_cpu_fill_host(x86_cpu_def);
+        object_property_set_bool(OBJECT(cpu), true, "pmu", &error_abort);
         return 0;
     }
 
@@ -1492,18 +1601,6 @@ static int cpu_x86_find_by_name(x86_def_t *x86_cpu_def, const char *name)
         def = &builtin_x86_defs[i];
         if (strcmp(name, def->name) == 0) {
             memcpy(x86_cpu_def, def, sizeof(*def));
-            /* sysenter isn't supported in compatibility mode on AMD,
-             * syscall isn't supported in compatibility mode on Intel.
-             * Normally we advertise the actual CPU vendor, but you can
-             * override this using the 'vendor' property if you want to use
-             * KVM's sysenter/syscall emulation in compatibility mode and
-             * when doing cross vendor migration
-             */
-            if (kvm_enabled()) {
-                uint32_t  ebx = 0, ecx = 0, edx = 0;
-                host_cpuid(0, 0, NULL, &ebx, &ecx, &edx);
-                x86_cpu_vendor_words2str(x86_cpu_def->vendor, ebx, edx, ecx);
-            }
             return 0;
         }
     }
@@ -1544,15 +1641,7 @@ static void cpu_x86_parse_featurestr(X86CPU *cpu, char *features, Error **errp)
         } else if ((val = strchr(featurestr, '='))) {
             *val = 0; val++;
             feat2prop(featurestr);
-            if (!strcmp(featurestr, "family")) {
-                object_property_parse(OBJECT(cpu), val, featurestr, errp);
-            } else if (!strcmp(featurestr, "model")) {
-                object_property_parse(OBJECT(cpu), val, featurestr, errp);
-            } else if (!strcmp(featurestr, "stepping")) {
-                object_property_parse(OBJECT(cpu), val, featurestr, errp);
-            } else if (!strcmp(featurestr, "level")) {
-                object_property_parse(OBJECT(cpu), val, featurestr, errp);
-            } else if (!strcmp(featurestr, "xlevel")) {
+            if (!strcmp(featurestr, "xlevel")) {
                 char *err;
                 char num[32];
 
@@ -1568,10 +1657,6 @@ static void cpu_x86_parse_featurestr(X86CPU *cpu, char *features, Error **errp)
                 }
                 snprintf(num, sizeof(num), "%" PRIu32, numvalue);
                 object_property_parse(OBJECT(cpu), num, featurestr, errp);
-            } else if (!strcmp(featurestr, "vendor")) {
-                object_property_parse(OBJECT(cpu), val, featurestr, errp);
-            } else if (!strcmp(featurestr, "model-id")) {
-                object_property_parse(OBJECT(cpu), val, featurestr, errp);
             } else if (!strcmp(featurestr, "tsc-freq")) {
                 int64_t tsc_freq;
                 char *err;
@@ -1587,28 +1672,27 @@ static void cpu_x86_parse_featurestr(X86CPU *cpu, char *features, Error **errp)
                 object_property_parse(OBJECT(cpu), num, "tsc-frequency", errp);
             } else if (!strcmp(featurestr, "hv-spinlocks")) {
                 char *err;
+                const int min = 0xFFF;
+                char num[32];
                 numvalue = strtoul(val, &err, 0);
                 if (!*val || *err) {
                     error_setg(errp, "bad numerical value %s", val);
                     goto out;
                 }
-                hyperv_set_spinlock_retries(numvalue);
+                if (numvalue < min) {
+                    fprintf(stderr, "hv-spinlocks value shall always be >= 0x%x"
+                            ", fixup will be removed in future versions\n",
+                            min);
+                    numvalue = min;
+                }
+                snprintf(num, sizeof(num), "%" PRId32, numvalue);
+                object_property_parse(OBJECT(cpu), num, featurestr, errp);
             } else {
-                error_setg(errp, "unrecognized feature %s", featurestr);
-                goto out;
+                object_property_parse(OBJECT(cpu), val, featurestr, errp);
             }
-        } else if (!strcmp(featurestr, "check")) {
-            check_cpuid = 1;
-        } else if (!strcmp(featurestr, "enforce")) {
-            check_cpuid = enforce_cpuid = 1;
-        } else if (!strcmp(featurestr, "hv_relaxed")) {
-            hyperv_enable_relaxed_timing(true);
-        } else if (!strcmp(featurestr, "hv_vapic")) {
-            hyperv_enable_vapic_recommended(true);
         } else {
-            error_setg(errp, "feature string `%s' not in format (+feature|"
-                       "-feature|feature=xyz)", featurestr);
-            goto out;
+            feat2prop(featurestr);
+            object_property_parse(OBJECT(cpu), "on", featurestr, errp);
         }
         if (error_is_set(errp)) {
             goto out;
@@ -1716,7 +1800,6 @@ CpuDefinitionInfoList *arch_query_cpu_definitions(Error **errp)
     return cpu_list;
 }
 
-#ifdef CONFIG_KVM
 static void filter_features_for_kvm(X86CPU *cpu)
 {
     CPUX86State *env = &cpu->env;
@@ -1733,7 +1816,6 @@ static void filter_features_for_kvm(X86CPU *cpu)
         cpu->filtered_features[w] = requested_features & ~env->features[w];
     }
 }
-#endif
 
 static void cpu_x86_register(X86CPU *cpu, const char *name, Error **errp)
 {
@@ -1742,17 +1824,11 @@ static void cpu_x86_register(X86CPU *cpu, const char *name, Error **errp)
 
     memset(def, 0, sizeof(*def));
 
-    if (cpu_x86_find_by_name(def, name) < 0) {
+    if (cpu_x86_find_by_name(cpu, def, name) < 0) {
         error_setg(errp, "Unable to find CPU definition: %s", name);
         return;
     }
 
-    if (kvm_enabled()) {
-        def->features[FEAT_KVM] |= kvm_default_features;
-    }
-    def->features[FEAT_1_ECX] |= CPUID_EXT_HYPERVISOR;
-
-    object_property_set_str(OBJECT(cpu), def->vendor, "vendor", errp);
     object_property_set_int(OBJECT(cpu), def->level, "level", errp);
     object_property_set_int(OBJECT(cpu), def->family, "family", errp);
     object_property_set_int(OBJECT(cpu), def->model, "model", errp);
@@ -1767,15 +1843,40 @@ static void cpu_x86_register(X86CPU *cpu, const char *name, Error **errp)
     env->features[FEAT_C000_0001_EDX] = def->features[FEAT_C000_0001_EDX];
     env->features[FEAT_7_0_EBX] = def->features[FEAT_7_0_EBX];
     env->cpuid_xlevel2 = def->xlevel2;
+    cpu->cache_info_passthrough = def->cache_info_passthrough;
 
     object_property_set_str(OBJECT(cpu), def->model_id, "model-id", errp);
+
+    /* Special cases not set in the x86_def_t structs: */
+    if (kvm_enabled()) {
+        env->features[FEAT_KVM] |= kvm_default_features;
+    }
+    env->features[FEAT_1_ECX] |= CPUID_EXT_HYPERVISOR;
+
+    /* sysenter isn't supported in compatibility mode on AMD,
+     * syscall isn't supported in compatibility mode on Intel.
+     * Normally we advertise the actual CPU vendor, but you can
+     * override this using the 'vendor' property if you want to use
+     * KVM's sysenter/syscall emulation in compatibility mode and
+     * when doing cross vendor migration
+     */
+    const char *vendor = def->vendor;
+    char host_vendor[CPUID_VENDOR_SZ + 1];
+    if (kvm_enabled()) {
+        uint32_t  ebx = 0, ecx = 0, edx = 0;
+        host_cpuid(0, 0, NULL, &ebx, &ecx, &edx);
+        x86_cpu_vendor_words2str(host_vendor, ebx, edx, ecx);
+        vendor = host_vendor;
+    }
+
+    object_property_set_str(OBJECT(cpu), vendor, "vendor", errp);
+
 }
 
 X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
                        Error **errp)
 {
     X86CPU *cpu = NULL;
-    CPUX86State *env;
     gchar **model_pieces;
     char *name, *features;
     char *typename;
@@ -1798,8 +1899,6 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
     qdev_set_parent_bus(DEVICE(cpu), qdev_get_child_bus(icc_bridge, "icc"));
     object_unref(OBJECT(cpu));
 #endif
-    env = &cpu->env;
-    env->cpu_model_str = cpu_model;
 
     cpu_x86_register(cpu, name, &error);
     if (error) {
@@ -1820,7 +1919,11 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
     }
 
 out:
-    error_propagate(errp, error);
+    if (error != NULL) {
+        error_propagate(errp, error);
+        object_unref(OBJECT(cpu));
+        cpu = NULL;
+    }
     g_strfreev(model_pieces);
     return cpu;
 }
@@ -1839,7 +1942,7 @@ X86CPU *cpu_x86_init(const char *cpu_model)
 
 out:
     if (error) {
-        fprintf(stderr, "%s\n", error_get_pretty(error));
+        error_report("%s", error_get_pretty(error));
         error_free(error);
         if (cpu != NULL) {
             object_unref(OBJECT(cpu));
@@ -1937,39 +2040,57 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         break;
     case 2:
         /* cache info: needed for Pentium Pro compatibility */
-        *eax = 1;
+        if (cpu->cache_info_passthrough) {
+            host_cpuid(index, 0, eax, ebx, ecx, edx);
+            break;
+        }
+        *eax = 1; /* Number of CPUID[EAX=2] calls required */
         *ebx = 0;
         *ecx = 0;
-        *edx = 0x2c307d;
+        *edx = (L1D_DESCRIPTOR << 16) | \
+               (L1I_DESCRIPTOR <<  8) | \
+               (L2_DESCRIPTOR);
         break;
     case 4:
         /* cache info: needed for Core compatibility */
-        if (cs->nr_cores > 1) {
-            *eax = (cs->nr_cores - 1) << 26;
+        if (cpu->cache_info_passthrough) {
+            host_cpuid(index, count, eax, ebx, ecx, edx);
+            *eax &= ~0xFC000000;
         } else {
             *eax = 0;
-        }
-        switch (count) {
+            switch (count) {
             case 0: /* L1 dcache info */
-                *eax |= 0x0000121;
-                *ebx = 0x1c0003f;
-                *ecx = 0x000003f;
-                *edx = 0x0000001;
+                *eax |= CPUID_4_TYPE_DCACHE | \
+                        CPUID_4_LEVEL(1) | \
+                        CPUID_4_SELF_INIT_LEVEL;
+                *ebx = (L1D_LINE_SIZE - 1) | \
+                       ((L1D_PARTITIONS - 1) << 12) | \
+                       ((L1D_ASSOCIATIVITY - 1) << 22);
+                *ecx = L1D_SETS - 1;
+                *edx = CPUID_4_NO_INVD_SHARING;
                 break;
             case 1: /* L1 icache info */
-                *eax |= 0x0000122;
-                *ebx = 0x1c0003f;
-                *ecx = 0x000003f;
-                *edx = 0x0000001;
+                *eax |= CPUID_4_TYPE_ICACHE | \
+                        CPUID_4_LEVEL(1) | \
+                        CPUID_4_SELF_INIT_LEVEL;
+                *ebx = (L1I_LINE_SIZE - 1) | \
+                       ((L1I_PARTITIONS - 1) << 12) | \
+                       ((L1I_ASSOCIATIVITY - 1) << 22);
+                *ecx = L1I_SETS - 1;
+                *edx = CPUID_4_NO_INVD_SHARING;
                 break;
             case 2: /* L2 cache info */
-                *eax |= 0x0000143;
+                *eax |= CPUID_4_TYPE_UNIFIED | \
+                        CPUID_4_LEVEL(2) | \
+                        CPUID_4_SELF_INIT_LEVEL;
                 if (cs->nr_threads > 1) {
                     *eax |= (cs->nr_threads - 1) << 14;
                 }
-                *ebx = 0x3c0003f;
-                *ecx = 0x0000fff;
-                *edx = 0x0000001;
+                *ebx = (L2_LINE_SIZE - 1) | \
+                       ((L2_PARTITIONS - 1) << 12) | \
+                       ((L2_ASSOCIATIVITY - 1) << 22);
+                *ecx = L2_SETS - 1;
+                *edx = CPUID_4_NO_INVD_SHARING;
                 break;
             default: /* end of info */
                 *eax = 0;
@@ -1977,6 +2098,12 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
                 *ecx = 0;
                 *edx = 0;
                 break;
+            }
+        }
+
+        /* QEMU gives out its own APIC IDs, never pass down bits 31..26.  */
+        if ((*eax & 31) && cs->nr_cores > 1) {
+            *eax |= (cs->nr_cores - 1) << 26;
         }
         break;
     case 5:
@@ -2016,7 +2143,7 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         break;
     case 0xA:
         /* Architectural Performance Monitoring Leaf */
-        if (kvm_enabled()) {
+        if (kvm_enabled() && cpu->enable_pmu) {
             KVMState *s = cs->kvm_state;
 
             *eax = kvm_arch_get_supported_cpuid(s, 0xA, count, R_EAX);
@@ -2030,29 +2157,51 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
             *edx = 0;
         }
         break;
-    case 0xD:
+    case 0xD: {
+        KVMState *s = cs->kvm_state;
+        uint64_t kvm_mask;
+        int i;
+
         /* Processor Extended State */
-        if (!(env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE)) {
-            *eax = 0;
-            *ebx = 0;
-            *ecx = 0;
-            *edx = 0;
+        *eax = 0;
+        *ebx = 0;
+        *ecx = 0;
+        *edx = 0;
+        if (!(env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE) || !kvm_enabled()) {
             break;
         }
-        if (kvm_enabled()) {
-            KVMState *s = cs->kvm_state;
+        kvm_mask =
+            kvm_arch_get_supported_cpuid(s, 0xd, 0, R_EAX) |
+            ((uint64_t)kvm_arch_get_supported_cpuid(s, 0xd, 0, R_EDX) << 32);
 
-            *eax = kvm_arch_get_supported_cpuid(s, 0xd, count, R_EAX);
-            *ebx = kvm_arch_get_supported_cpuid(s, 0xd, count, R_EBX);
-            *ecx = kvm_arch_get_supported_cpuid(s, 0xd, count, R_ECX);
-            *edx = kvm_arch_get_supported_cpuid(s, 0xd, count, R_EDX);
-        } else {
-            *eax = 0;
-            *ebx = 0;
-            *ecx = 0;
-            *edx = 0;
+        if (count == 0) {
+            *ecx = 0x240;
+            for (i = 2; i < ARRAY_SIZE(ext_save_areas); i++) {
+                const ExtSaveArea *esa = &ext_save_areas[i];
+                if ((env->features[esa->feature] & esa->bits) == esa->bits &&
+                    (kvm_mask & (1 << i)) != 0) {
+                    if (i < 32) {
+                        *eax |= 1 << i;
+                    } else {
+                        *edx |= 1 << (i - 32);
+                    }
+                    *ecx = MAX(*ecx, esa->offset + esa->size);
+                }
+            }
+            *eax |= kvm_mask & (XSTATE_FP | XSTATE_SSE);
+            *ebx = *ecx;
+        } else if (count == 1) {
+            *eax = kvm_arch_get_supported_cpuid(s, 0xd, 1, R_EAX);
+        } else if (count < ARRAY_SIZE(ext_save_areas)) {
+            const ExtSaveArea *esa = &ext_save_areas[count];
+            if ((env->features[esa->feature] & esa->bits) == esa->bits &&
+                (kvm_mask & (1 << count)) != 0) {
+                *eax = esa->size;
+                *ebx = esa->offset;
+            }
         }
         break;
+    }
     case 0x80000000:
         *eax = env->cpuid_xlevel;
         *ebx = env->cpuid_vendor1;
@@ -2089,17 +2238,39 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         break;
     case 0x80000005:
         /* cache info (L1 cache) */
-        *eax = 0x01ff01ff;
-        *ebx = 0x01ff01ff;
-        *ecx = 0x40020140;
-        *edx = 0x40020140;
+        if (cpu->cache_info_passthrough) {
+            host_cpuid(index, 0, eax, ebx, ecx, edx);
+            break;
+        }
+        *eax = (L1_DTLB_2M_ASSOC << 24) | (L1_DTLB_2M_ENTRIES << 16) | \
+               (L1_ITLB_2M_ASSOC <<  8) | (L1_ITLB_2M_ENTRIES);
+        *ebx = (L1_DTLB_4K_ASSOC << 24) | (L1_DTLB_4K_ENTRIES << 16) | \
+               (L1_ITLB_4K_ASSOC <<  8) | (L1_ITLB_4K_ENTRIES);
+        *ecx = (L1D_SIZE_KB_AMD << 24) | (L1D_ASSOCIATIVITY_AMD << 16) | \
+               (L1D_LINES_PER_TAG << 8) | (L1D_LINE_SIZE);
+        *edx = (L1I_SIZE_KB_AMD << 24) | (L1I_ASSOCIATIVITY_AMD << 16) | \
+               (L1I_LINES_PER_TAG << 8) | (L1I_LINE_SIZE);
         break;
     case 0x80000006:
         /* cache info (L2 cache) */
-        *eax = 0;
-        *ebx = 0x42004200;
-        *ecx = 0x02008140;
-        *edx = 0;
+        if (cpu->cache_info_passthrough) {
+            host_cpuid(index, 0, eax, ebx, ecx, edx);
+            break;
+        }
+        *eax = (AMD_ENC_ASSOC(L2_DTLB_2M_ASSOC) << 28) | \
+               (L2_DTLB_2M_ENTRIES << 16) | \
+               (AMD_ENC_ASSOC(L2_ITLB_2M_ASSOC) << 12) | \
+               (L2_ITLB_2M_ENTRIES);
+        *ebx = (AMD_ENC_ASSOC(L2_DTLB_4K_ASSOC) << 28) | \
+               (L2_DTLB_4K_ENTRIES << 16) | \
+               (AMD_ENC_ASSOC(L2_ITLB_4K_ASSOC) << 12) | \
+               (L2_ITLB_4K_ENTRIES);
+        *ecx = (L2_SIZE_KB_AMD << 16) | \
+               (AMD_ENC_ASSOC(L2_ASSOCIATIVITY) << 12) | \
+               (L2_LINES_PER_TAG << 8) | (L2_LINE_SIZE);
+        *edx = ((L3_SIZE_KB/512) << 18) | \
+               (AMD_ENC_ASSOC(L3_ASSOCIATIVITY) << 12) | \
+               (L3_LINES_PER_TAG << 8) | (L3_LINE_SIZE);
         break;
     case 0x80000008:
         /* virtual & phys address size in low 2 bytes. */
@@ -2233,6 +2404,7 @@ static void x86_cpu_reset(CPUState *s)
     env->fpuc = 0x37f;
 
     env->mxcsr = 0x1f80;
+    env->xstate_bv = XSTATE_FP | XSTATE_SSE;
 
     env->pat = 0x0007040600070406ULL;
     env->msr_ia32_misc_enable = MSR_IA32_MISC_ENABLE_DEFAULT;
@@ -2243,10 +2415,13 @@ static void x86_cpu_reset(CPUState *s)
     cpu_breakpoint_remove_all(env, BP_CPU);
     cpu_watchpoint_remove_all(env, BP_CPU);
 
+    env->tsc_adjust = 0;
+    env->tsc = 0;
+
 #if !defined(CONFIG_USER_ONLY)
     /* We hard-wire the BSP to the first CPU. */
     if (s->cpu_index == 0) {
-        apic_designate_bsp(env->apic_state);
+        apic_designate_bsp(cpu->apic_state);
     }
 
     s->halted = !cpu_is_bsp(cpu);
@@ -2256,7 +2431,7 @@ static void x86_cpu_reset(CPUState *s)
 #ifndef CONFIG_USER_ONLY
 bool cpu_is_bsp(X86CPU *cpu)
 {
-    return cpu_get_apic_base(cpu->env.apic_state) & MSR_IA32_APICBASE_BSP;
+    return cpu_get_apic_base(cpu->apic_state) & MSR_IA32_APICBASE_BSP;
 }
 
 /* TODO: remove me, when reset over QOM tree is implemented */
@@ -2297,31 +2472,29 @@ static void x86_cpu_apic_create(X86CPU *cpu, Error **errp)
         apic_type = "xen-apic";
     }
 
-    env->apic_state = qdev_try_create(qdev_get_parent_bus(dev), apic_type);
-    if (env->apic_state == NULL) {
+    cpu->apic_state = qdev_try_create(qdev_get_parent_bus(dev), apic_type);
+    if (cpu->apic_state == NULL) {
         error_setg(errp, "APIC device '%s' could not be created", apic_type);
         return;
     }
 
     object_property_add_child(OBJECT(cpu), "apic",
-                              OBJECT(env->apic_state), NULL);
-    qdev_prop_set_uint8(env->apic_state, "id", env->cpuid_apic_id);
+                              OBJECT(cpu->apic_state), NULL);
+    qdev_prop_set_uint8(cpu->apic_state, "id", env->cpuid_apic_id);
     /* TODO: convert to link<> */
-    apic = APIC_COMMON(env->apic_state);
+    apic = APIC_COMMON(cpu->apic_state);
     apic->cpu = cpu;
 }
 
 static void x86_cpu_apic_realize(X86CPU *cpu, Error **errp)
 {
-    CPUX86State *env = &cpu->env;
-
-    if (env->apic_state == NULL) {
+    if (cpu->apic_state == NULL) {
         return;
     }
 
-    if (qdev_init(env->apic_state)) {
+    if (qdev_init(cpu->apic_state)) {
         error_setg(errp, "APIC device '%s' could not be initialized",
-                   object_get_typename(OBJECT(env->apic_state)));
+                   object_get_typename(OBJECT(cpu->apic_state)));
         return;
     }
 }
@@ -2333,6 +2506,7 @@ static void x86_cpu_apic_realize(X86CPU *cpu, Error **errp)
 
 static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
 {
+    CPUState *cs = CPU(dev);
     X86CPU *cpu = X86_CPU(dev);
     X86CPUClass *xcc = X86_CPU_GET_CLASS(dev);
     CPUX86State *env = &cpu->env;
@@ -2364,15 +2538,14 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
         env->features[FEAT_8000_0001_ECX] &= TCG_EXT3_FEATURES;
         env->features[FEAT_SVM] &= TCG_SVM_FEATURES;
     } else {
-        if (check_cpuid && kvm_check_features_against_host(cpu)
-            && enforce_cpuid) {
+        KVMState *s = kvm_state;
+        if ((cpu->check_cpuid || cpu->enforce_cpuid)
+            && kvm_check_features_against_host(s, cpu) && cpu->enforce_cpuid) {
             error_setg(&local_err,
                        "Host's CPU doesn't support requested features");
             goto out;
         }
-#ifdef CONFIG_KVM
         filter_features_for_kvm(cpu);
-#endif
     }
 
 #ifndef CONFIG_USER_ONLY
@@ -2387,12 +2560,13 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
 #endif
 
     mce_init(cpu);
+    qemu_init_vcpu(cs);
 
     x86_cpu_apic_realize(cpu, &local_err);
     if (local_err != NULL) {
         goto out;
     }
-    cpu_reset(CPU(cpu));
+    cpu_reset(cs);
 
     xcc->parent_realize(dev, &local_err);
 out:
@@ -2479,6 +2653,7 @@ static void x86_cpu_initfn(Object *obj)
                         x86_cpu_get_feature_words,
                         NULL, NULL, (void *)cpu->filtered_features, NULL);
 
+    cpu->hyperv_spinlock_attempts = HYPERV_SPINLOCK_NEVER_RETRY;
     env->cpuid_apic_id = x86_cpu_apic_id_from_index(cs->cpu_index);
 
     /* init various static tables used in TCG mode */
@@ -2520,6 +2695,17 @@ static void x86_cpu_synchronize_from_tb(CPUState *cs, TranslationBlock *tb)
     cpu->env.eip = tb->pc - tb->cs_base;
 }
 
+static Property x86_cpu_properties[] = {
+    DEFINE_PROP_BOOL("pmu", X86CPU, enable_pmu, false),
+    { .name  = "hv-spinlocks", .info  = &qdev_prop_spinlocks },
+    DEFINE_PROP_BOOL("hv-relaxed", X86CPU, hyperv_relaxed_timing, false),
+    DEFINE_PROP_BOOL("hv-vapic", X86CPU, hyperv_vapic, false),
+    DEFINE_PROP_BOOL("hv-time", X86CPU, hyperv_time, false),
+    DEFINE_PROP_BOOL("check", X86CPU, check_cpuid, false),
+    DEFINE_PROP_BOOL("enforce", X86CPU, enforce_cpuid, false),
+    DEFINE_PROP_END_OF_LIST()
+};
+
 static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
 {
     X86CPUClass *xcc = X86_CPU_CLASS(oc);
@@ -2529,6 +2715,7 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     xcc->parent_realize = dc->realize;
     dc->realize = x86_cpu_realizefn;
     dc->bus_type = TYPE_ICC_BUS;
+    dc->props = x86_cpu_properties;
 
     xcc->parent_reset = cc->reset;
     cc->reset = x86_cpu_reset;
@@ -2538,6 +2725,8 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     cc->dump_state = x86_cpu_dump_state;
     cc->set_pc = x86_cpu_set_pc;
     cc->synchronize_from_tb = x86_cpu_synchronize_from_tb;
+    cc->gdb_read_register = x86_cpu_gdb_read_register;
+    cc->gdb_write_register = x86_cpu_gdb_write_register;
     cc->get_arch_id = x86_cpu_get_arch_id;
     cc->get_paging_enabled = x86_cpu_get_paging_enabled;
 #ifndef CONFIG_USER_ONLY
@@ -2549,6 +2738,7 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     cc->write_elf32_qemunote = x86_cpu_write_elf32_qemunote;
     cc->vmsd = &vmstate_x86_cpu;
 #endif
+    cc->gdb_num_core_regs = CPU_NB_REGS * 2 + 25;
 }
 
 static const TypeInfo x86_cpu_type_info = {

@@ -183,7 +183,6 @@ static void a9_daughterboard_init(const VEDBoardInfo *daughterboard,
     MemoryRegion *lowram = g_new(MemoryRegion, 1);
     DeviceState *dev;
     SysBusDevice *busdev;
-    qemu_irq *irqp;
     int n;
     qemu_irq cpu_irq[4];
     ram_addr_t low_ram_size;
@@ -198,8 +197,7 @@ static void a9_daughterboard_init(const VEDBoardInfo *daughterboard,
             fprintf(stderr, "Unable to find CPU definition\n");
             exit(1);
         }
-        irqp = arm_pic_init_cpu(cpu);
-        cpu_irq[n] = irqp[ARM_PIC_CPU_IRQ];
+        cpu_irq[n] = qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ);
     }
 
     if (ram_size > 0x40000000) {
@@ -312,15 +310,13 @@ static void a15_daughterboard_init(const VEDBoardInfo *daughterboard,
 
     for (n = 0; n < smp_cpus; n++) {
         ARMCPU *cpu;
-        qemu_irq *irqp;
 
         cpu = cpu_arm_init(cpu_model);
         if (!cpu) {
             fprintf(stderr, "Unable to find CPU definition\n");
             exit(1);
         }
-        irqp = arm_pic_init_cpu(cpu);
-        cpu_irq[n] = irqp[ARM_PIC_CPU_IRQ];
+        cpu_irq[n] = qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ);
     }
 
     {
@@ -423,13 +419,13 @@ static int add_virtio_mmio_node(void *fdt, uint32_t acells, uint32_t scells,
     int rc;
     char *nodename = g_strdup_printf("/virtio_mmio@%" PRIx64, addr);
 
-    rc = qemu_devtree_add_subnode(fdt, nodename);
-    rc |= qemu_devtree_setprop_string(fdt, nodename,
-                                      "compatible", "virtio,mmio");
-    rc |= qemu_devtree_setprop_sized_cells(fdt, nodename, "reg",
-                                           acells, addr, scells, size);
-    qemu_devtree_setprop_cells(fdt, nodename, "interrupt-parent", intc);
-    qemu_devtree_setprop_cells(fdt, nodename, "interrupts", 0, irq, 1);
+    rc = qemu_fdt_add_subnode(fdt, nodename);
+    rc |= qemu_fdt_setprop_string(fdt, nodename,
+                                  "compatible", "virtio,mmio");
+    rc |= qemu_fdt_setprop_sized_cells(fdt, nodename, "reg",
+                                       acells, addr, scells, size);
+    qemu_fdt_setprop_cells(fdt, nodename, "interrupt-parent", intc);
+    qemu_fdt_setprop_cells(fdt, nodename, "interrupts", 0, irq, 1);
     g_free(nodename);
     if (rc) {
         return -1;
@@ -460,8 +456,8 @@ static void vexpress_modify_dtb(const struct arm_boot_info *info, void *fdt)
     uint32_t acells, scells, intc;
     const VEDBoardInfo *daughterboard = (const VEDBoardInfo *)info;
 
-    acells = qemu_devtree_getprop_cell(fdt, "/", "#address-cells");
-    scells = qemu_devtree_getprop_cell(fdt, "/", "#size-cells");
+    acells = qemu_fdt_getprop_cell(fdt, "/", "#address-cells");
+    scells = qemu_fdt_getprop_cell(fdt, "/", "#size-cells");
     intc = find_int_controller(fdt);
     if (!intc) {
         /* Not fatal, we just won't provide virtio. This will
@@ -482,6 +478,36 @@ static void vexpress_modify_dtb(const struct arm_boot_info *info, void *fdt)
                                  0x200, intc, 40 + i);
         }
     }
+}
+
+
+/* Open code a private version of pflash registration since we
+ * need to set non-default device width for VExpress platform.
+ */
+static pflash_t *ve_pflash_cfi01_register(hwaddr base, const char *name,
+                                          DriveInfo *di)
+{
+    DeviceState *dev = qdev_create(NULL, "cfi.pflash01");
+
+    if (di && qdev_prop_set_drive(dev, "drive", di->bdrv)) {
+        abort();
+    }
+
+    qdev_prop_set_uint32(dev, "num-blocks",
+                         VEXPRESS_FLASH_SIZE / VEXPRESS_FLASH_SECT_SIZE);
+    qdev_prop_set_uint64(dev, "sector-length", VEXPRESS_FLASH_SECT_SIZE);
+    qdev_prop_set_uint8(dev, "width", 4);
+    qdev_prop_set_uint8(dev, "device-width", 2);
+    qdev_prop_set_uint8(dev, "big-endian", 0);
+    qdev_prop_set_uint16(dev, "id0", 0x89);
+    qdev_prop_set_uint16(dev, "id1", 0x18);
+    qdev_prop_set_uint16(dev, "id2", 0x00);
+    qdev_prop_set_uint16(dev, "id3", 0x00);
+    qdev_prop_set_string(dev, "name", name);
+    qdev_init_nofail(dev);
+
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+    return OBJECT_CHECK(pflash_t, (dev), "cfi.pflash01");
 }
 
 static void vexpress_common_init(VEDBoardInfo *daughterboard,
@@ -565,11 +591,8 @@ static void vexpress_common_init(VEDBoardInfo *daughterboard,
     sysbus_create_simple("pl111", map[VE_CLCD], pic[14]);
 
     dinfo = drive_get_next(IF_PFLASH);
-    pflash0 = pflash_cfi01_register(map[VE_NORFLASH0], NULL, "vexpress.flash0",
-            VEXPRESS_FLASH_SIZE, dinfo ? dinfo->bdrv : NULL,
-            VEXPRESS_FLASH_SECT_SIZE,
-            VEXPRESS_FLASH_SIZE / VEXPRESS_FLASH_SECT_SIZE, 4,
-            0x00, 0x89, 0x00, 0x18, 0);
+    pflash0 = ve_pflash_cfi01_register(map[VE_NORFLASH0], "vexpress.flash0",
+                                       dinfo);
     if (!pflash0) {
         fprintf(stderr, "vexpress: error registering flash 0.\n");
         exit(1);
@@ -584,11 +607,8 @@ static void vexpress_common_init(VEDBoardInfo *daughterboard,
     }
 
     dinfo = drive_get_next(IF_PFLASH);
-    if (!pflash_cfi01_register(map[VE_NORFLASH1], NULL, "vexpress.flash1",
-            VEXPRESS_FLASH_SIZE, dinfo ? dinfo->bdrv : NULL,
-            VEXPRESS_FLASH_SECT_SIZE,
-            VEXPRESS_FLASH_SIZE / VEXPRESS_FLASH_SECT_SIZE, 4,
-            0x00, 0x89, 0x00, 0x18, 0)) {
+    if (!ve_pflash_cfi01_register(map[VE_NORFLASH1], "vexpress.flash1",
+                                  dinfo)) {
         fprintf(stderr, "vexpress: error registering flash 1.\n");
         exit(1);
     }
@@ -651,7 +671,6 @@ static QEMUMachine vexpress_a9_machine = {
     .init = vexpress_a9_init,
     .block_default_type = IF_SCSI,
     .max_cpus = 4,
-    DEFAULT_MACHINE_OPTIONS,
 };
 
 static QEMUMachine vexpress_a15_machine = {
@@ -660,7 +679,6 @@ static QEMUMachine vexpress_a15_machine = {
     .init = vexpress_a15_init,
     .block_default_type = IF_SCSI,
     .max_cpus = 4,
-    DEFAULT_MACHINE_OPTIONS,
 };
 
 static void vexpress_machine_init(void)

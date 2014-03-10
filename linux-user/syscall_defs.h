@@ -27,6 +27,7 @@
 #define SOCKOP_getsockopt       15
 #define SOCKOP_sendmsg          16
 #define SOCKOP_recvmsg          17
+#define SOCKOP_accept4          18
 
 #define IPCOP_semop		1
 #define IPCOP_semget		2
@@ -119,6 +120,18 @@ struct target_sockaddr {
     uint8_t sa_data[14];
 };
 
+struct target_sock_filter {
+    abi_ushort code;
+    uint8_t jt;
+    uint8_t jf;
+    abi_uint k;
+};
+
+struct target_sock_fprog {
+    abi_ushort len;
+    abi_ulong filter;
+};
+
 struct target_in_addr {
     uint32_t s_addr; /* big endian */
 };
@@ -154,6 +167,11 @@ struct target_timespec {
 struct target_itimerval {
     struct target_timeval it_interval;
     struct target_timeval it_value;
+};
+
+struct target_itimerspec {
+    struct target_timespec it_interval;
+    struct target_timespec it_value;
 };
 
 typedef abi_long target_clock_t;
@@ -883,6 +901,7 @@ struct target_pollfd {
 #define TARGET_BLKSECTSET TARGET_IO(0x12,102)/* set max sectors per request (ll_rw_blk.c) */
 #define TARGET_BLKSECTGET TARGET_IO(0x12,103)/* get max sectors per request (ll_rw_blk.c) */
 #define TARGET_BLKSSZGET  TARGET_IO(0x12,104)/* get block device sector size */
+#define TARGET_BLKPG      TARGET_IO(0x12,105)/* Partition table and disk geometry handling */
 /* A jump here: 108-111 have been used for various private purposes. */
 #define TARGET_BLKBSZGET  TARGET_IOR(0x12, 112, abi_ulong)
 #define TARGET_BLKBSZSET  TARGET_IOW(0x12, 113, abi_ulong)
@@ -1137,9 +1156,9 @@ struct target_winsize {
 #define TARGET_MAP_UNINITIALIZED 0x4000000	/* for anonymous mmap, memory could be uninitialized */
 #endif
 
-#if (defined(TARGET_I386) && defined(TARGET_ABI32)) || defined(TARGET_ARM) \
-    || defined(TARGET_CRIS) || defined(TARGET_UNICORE32) \
-    || defined(TARGET_OPENRISC)
+#if (defined(TARGET_I386) && defined(TARGET_ABI32)) \
+    || (defined(TARGET_ARM) && defined(TARGET_ABI32)) \
+    || defined(TARGET_CRIS) || defined(TARGET_UNICORE32)
 struct target_stat {
 	unsigned short st_dev;
 	unsigned short __pad1;
@@ -1166,6 +1185,7 @@ struct target_stat {
 /* This matches struct stat64 in glibc2.1, hence the absolutely
  * insane amounts of padding around dev_t's.
  */
+#define TARGET_HAS_STRUCT_STAT64
 struct target_stat64 {
 	unsigned short	st_dev;
 	unsigned char	__pad0[10];
@@ -1201,6 +1221,7 @@ struct target_stat64 {
 } QEMU_PACKED;
 
 #ifdef TARGET_ARM
+#define TARGET_HAS_STRUCT_STAT64
 struct target_eabi_stat64 {
         unsigned long long st_dev;
         unsigned int    __pad1;
@@ -1250,6 +1271,7 @@ struct target_stat {
 	abi_ulong	__unused4[2];
 };
 
+#define TARGET_HAS_STRUCT_STAT64
 struct target_stat64 {
 	unsigned char	__pad0[6];
 	unsigned short	st_dev;
@@ -1305,6 +1327,7 @@ struct target_stat {
 	abi_ulong	__unused4[2];
 };
 
+#define TARGET_HAS_STRUCT_STAT64
 struct target_stat64 {
 	unsigned char	__pad0[6];
 	unsigned short	st_dev;
@@ -1372,6 +1395,8 @@ struct target_stat {
 #endif
 };
 
+#if !defined(TARGET_PPC64) || defined(TARGET_ABI32)
+#define TARGET_HAS_STRUCT_STAT64
 struct QEMU_PACKED target_stat64 {
 	unsigned long long st_dev;
         unsigned long long st_ino;
@@ -1394,6 +1419,7 @@ struct QEMU_PACKED target_stat64 {
         unsigned int   __unused4;
         unsigned int   __unused5;
 };
+#endif
 
 #elif defined(TARGET_MICROBLAZE)
 
@@ -1419,6 +1445,7 @@ struct target_stat {
 };
 
 /* FIXME: Microblaze no-mmu user-space has a difference stat64 layout...  */
+#define TARGET_HAS_STRUCT_STAT64
 struct QEMU_PACKED target_stat64 {
 	uint64_t st_dev;
 #define TARGET_STAT64_HAS_BROKEN_ST_INO 1
@@ -1474,6 +1501,7 @@ struct target_stat {
 /* This matches struct stat64 in glibc2.1, hence the absolutely
  * insane amounts of padding around dev_t's.
  */
+#define TARGET_HAS_STRUCT_STAT64
 struct target_stat64 {
 	unsigned long long	st_dev;
 	unsigned char	__pad1[2];
@@ -1582,6 +1610,7 @@ struct target_stat {
  * struct stat of the 64-bit kernel.
  */
 
+#define TARGET_HAS_STRUCT_STAT64
 struct target_stat64 {
 	unsigned int	st_dev;
 	unsigned int	st_pad0[3];	/* Reserved for st_dev expansion  */
@@ -1653,6 +1682,7 @@ struct target_stat {
  * struct stat of the 64-bit kernel.
  */
 
+#define TARGET_HAS_STRUCT_STAT64
 struct target_stat64 {
 	abi_ulong	st_dev;
 	abi_ulong	st_pad0[3];	/* Reserved for st_dev expansion  */
@@ -1709,6 +1739,7 @@ struct target_stat {
        unsigned int    st_gen;
 };
 
+#define TARGET_HAS_STRUCT_STAT64
 struct target_stat64 {
        abi_ulong    st_dev;
        abi_ulong    st_ino;
@@ -1758,6 +1789,7 @@ struct target_stat {
 /* This matches struct stat64 in glibc2.1, hence the absolutely
  * insane amounts of padding around dev_t's.
  */
+#define TARGET_HAS_STRUCT_STAT64
 struct QEMU_PACKED target_stat64 {
 	unsigned long long	st_dev;
 	unsigned char	__pad0[4];
@@ -1836,30 +1868,79 @@ struct target_stat {
     abi_long       st_blocks;
     abi_ulong  __unused[3];
 };
+#elif defined(TARGET_AARCH64)
+struct target_stat {
+    abi_ulong  st_dev;
+    abi_ulong  st_ino;
+    unsigned int st_mode;
+    unsigned int st_nlink;
+    unsigned int   st_uid;
+    unsigned int   st_gid;
+    abi_ulong  st_rdev;
+    abi_ulong  _pad1;
+    abi_long  st_size;
+    int        st_blksize;
+    int        __pad2;
+    abi_long   st_blocks;
+    abi_long  target_st_atime;
+    abi_ulong  target_st_atime_nsec;
+    abi_long  target_st_mtime;
+    abi_ulong  target_st_mtime_nsec;
+    abi_long  target_st_ctime;
+    abi_ulong  target_st_ctime_nsec;
+    unsigned int __unused[2];
+};
 #elif defined(TARGET_OPENRISC)
+
+/* These are the asm-generic versions of the stat and stat64 structures */
+
 struct target_stat {
     abi_ulong st_dev;
     abi_ulong st_ino;
-    abi_ulong st_nlink;
-
     unsigned int st_mode;
+    unsigned int st_nlink;
     unsigned int st_uid;
     unsigned int st_gid;
-    unsigned int __pad0;
     abi_ulong st_rdev;
+    abi_ulong __pad1;
     abi_long st_size;
-    abi_long st_blksize;
-    abi_long st_blocks;    /* Number 512-byte blocks allocated. */
-
-    abi_ulong target_st_atime;
+    int st_blksize;
+    int __pad2;
+    abi_long st_blocks;
+    abi_long target_st_atime;
     abi_ulong target_st_atime_nsec;
-    abi_ulong target_st_mtime;
+    abi_long target_st_mtime;
     abi_ulong target_st_mtime_nsec;
-    abi_ulong target_st_ctime;
+    abi_long target_st_ctime;
     abi_ulong target_st_ctime_nsec;
-
-    abi_long __unused[3];
+    unsigned int __unused4;
+    unsigned int __unused5;
 };
+
+#define TARGET_HAS_STRUCT_STAT64
+struct target_stat64 {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    unsigned int st_mode;
+    unsigned int st_nlink;
+    unsigned int st_uid;
+    unsigned int st_gid;
+    uint64_t st_rdev;
+    uint64_t __pad1;
+    int64_t st_size;
+    int st_blksize;
+    int __pad2;
+    int64_t st_blocks;
+    int target_st_atime;
+    unsigned int target_st_atime_nsec;
+    int target_st_mtime;
+    unsigned int target_st_mtime_nsec;
+    int target_st_ctime;
+    unsigned int target_st_ctime_nsec;
+    unsigned int __unused4;
+    unsigned int __unused5;
+};
+
 #else
 #error unsupported CPU
 #endif
@@ -1918,7 +1999,8 @@ struct target_statfs64 {
 	uint32_t	f_spare[6];
 };
 #elif (defined(TARGET_PPC64) || defined(TARGET_X86_64) || \
-       defined(TARGET_SPARC64)) && !defined(TARGET_ABI32)
+       defined(TARGET_SPARC64) || defined(TARGET_AARCH64)) && \
+       !defined(TARGET_ABI32)
 struct target_statfs {
 	abi_long f_type;
 	abi_long f_bsize;
@@ -2434,8 +2516,11 @@ typedef union target_epoll_data {
 
 struct target_epoll_event {
     uint32_t events;
+#ifdef TARGET_ARM
+    uint32_t __pad;
+#endif
     target_epoll_data_t data;
-};
+} QEMU_PACKED;
 #endif
 struct target_rlimit64 {
     uint64_t rlim_cur;
@@ -2449,3 +2534,23 @@ struct target_ucred {
 };
 
 #endif
+
+
+struct target_timer_t {
+    abi_ulong ptr;
+};
+
+struct target_sigevent {
+    target_sigval_t sigev_value;
+    int32_t sigev_signo;
+    int32_t sigev_notify;
+    union {
+        int32_t _pad[ARRAY_SIZE(((struct sigevent *)0)->_sigev_un._pad)];
+        int32_t _tid;
+
+        struct {
+            void (*_function)(sigval_t);
+            void *_attribute;
+        } _sigev_thread;
+    } _sigev_un;
+};

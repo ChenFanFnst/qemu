@@ -66,8 +66,29 @@ typedef struct X86CPU {
 
     CPUX86State env;
 
+    bool hyperv_vapic;
+    bool hyperv_relaxed_timing;
+    int hyperv_spinlock_attempts;
+    bool hyperv_time;
+    bool check_cpuid;
+    bool enforce_cpuid;
+
+    /* if true the CPUID code directly forward host cache leaves to the guest */
+    bool cache_info_passthrough;
+
     /* Features that were filtered out because of missing host capabilities */
     uint32_t filtered_features[FEATURE_WORDS];
+
+    /* Enable PMU CPUID bits. This can't be enabled by default yet because
+     * it doesn't have ABI stability guarantees, as it passes all PMU CPUID
+     * bits returned by GET_SUPPORTED_CPUID (that depend on host CPU and kernel
+     * capabilities) directly to the guest.
+     */
+    bool enable_pmu;
+
+    /* in order to simplify APIC support, we leave this pointer to the
+       user */
+    struct DeviceState *apic_state;
 } X86CPU;
 
 static inline X86CPU *x86_env_get_cpu(CPUX86State *env)
@@ -105,5 +126,8 @@ void x86_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
                         int flags);
 
 hwaddr x86_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
+
+int x86_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
+int x86_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 
 #endif

@@ -2014,6 +2014,7 @@ void ppc_tlb_invalidate_one(CPUPPCState *env, target_ulong addr)
 void ppc_store_sdr1(CPUPPCState *env, target_ulong value)
 {
     LOG_MMU("%s: " TARGET_FMT_lx "\n", __func__, value);
+    assert(!env->external_htab);
     if (env->spr[SPR_SDR1] != value) {
         env->spr[SPR_SDR1] = value;
 #if defined(TARGET_PPC64)
@@ -2025,7 +2026,7 @@ void ppc_store_sdr1(CPUPPCState *env, target_ulong value)
                         " stored in SDR1\n", htabsize);
                 htabsize = 28;
             }
-            env->htab_mask = (1ULL << (htabsize + 18)) - 1;
+            env->htab_mask = (1ULL << (htabsize + 18 - 7)) - 1;
             env->htab_base = value & SDR_64_HTABORG;
         } else
 #endif /* defined(TARGET_PPC64) */
@@ -2061,7 +2062,7 @@ void helper_store_sr(CPUPPCState *env, target_ulong srnum, target_ulong value)
         /* ESID = srnum */
         rb |= ((uint32_t)srnum & 0xf) << 28;
         /* Set the valid bit */
-        rb |= 1 << 27;
+        rb |= SLB_ESID_V;
         /* Index = ESID */
         rb |= (uint32_t)srnum;
 
@@ -2870,6 +2871,8 @@ void helper_booke206_tlbflush(CPUPPCState *env, uint32_t type)
 
 
 /*****************************************************************************/
+
+#include "exec/softmmu_exec.h"
 
 #define MMUSUFFIX _mmu
 

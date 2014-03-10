@@ -60,6 +60,12 @@ typedef struct LM32CPU {
     /*< public >*/
 
     CPULM32State env;
+
+    uint32_t revision;
+    uint8_t num_interrupts;
+    uint8_t num_breakpoints;
+    uint8_t num_watchpoints;
+    uint32_t features;
 } LM32CPU;
 
 static inline LM32CPU *lm32_env_get_cpu(CPULM32State *env)
@@ -79,5 +85,7 @@ void lm32_cpu_do_interrupt(CPUState *cpu);
 void lm32_cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
                          int flags);
 hwaddr lm32_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
+int lm32_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
+int lm32_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 
 #endif

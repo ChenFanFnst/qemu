@@ -42,6 +42,8 @@
 #include "sysemu/blockdev.h"
 #include "hw/sysbus.h"
 #include "exec/address-spaces.h"
+#include "sysemu/qtest.h"
+#include "qemu/error-report.h"
 
 enum jazz_model_e
 {
@@ -106,6 +108,18 @@ static void cpu_request_exit(void *opaque, int irq, int level)
     }
 }
 
+static CPUUnassignedAccess real_do_unassigned_access;
+static void mips_jazz_do_unassigned_access(CPUState *cpu, hwaddr addr,
+                                           bool is_write, bool is_exec,
+                                           int opaque, unsigned size)
+{
+    if (!is_exec) {
+        /* ignore invalid access (ie do not raise exception) */
+        return;
+    }
+    (*real_do_unassigned_access)(cpu, addr, is_write, is_exec, opaque, size);
+}
+
 static void mips_jazz_init(MemoryRegion *address_space,
                            MemoryRegion *address_space_io,
                            ram_addr_t ram_size,
@@ -115,10 +129,12 @@ static void mips_jazz_init(MemoryRegion *address_space,
     char *filename;
     int bios_size, n;
     MIPSCPU *cpu;
+    CPUClass *cc;
     CPUMIPSState *env;
     qemu_irq *rc4030, *i8259;
     rc4030_dma *dmas;
     void* rc4030_opaque;
+    MemoryRegion *isa = g_new(MemoryRegion, 1);
     MemoryRegion *rtc = g_new(MemoryRegion, 1);
     MemoryRegion *i8042 = g_new(MemoryRegion, 1);
     MemoryRegion *dma_dummy = g_new(MemoryRegion, 1);
@@ -151,6 +167,17 @@ static void mips_jazz_init(MemoryRegion *address_space,
     env = &cpu->env;
     qemu_register_reset(main_cpu_reset, cpu);
 
+    /* Chipset returns 0 in invalid reads and do not raise data exceptions.
+     * However, we can't simply add a global memory region to catch
+     * everything, as memory core directly call unassigned_mem_read/write
+     * on some invalid accesses, which call do_unassigned_access on the
+     * CPU, which raise an exception.
+     * Handle that case by hijacking the do_unassigned_access method on
+     * the CPU, and do not raise exceptions for data access. */
+    cc = CPU_GET_CLASS(cpu);
+    real_do_unassigned_access = cc->do_unassigned_access;
+    cc->do_unassigned_access = mips_jazz_do_unassigned_access;
+
     /* allocate RAM */
     memory_region_init_ram(ram, NULL, "mips_jazz.ram", ram_size);
     vmstate_register_ram_global(ram);
@@ -175,9 +202,8 @@ static void mips_jazz_init(MemoryRegion *address_space,
     } else {
         bios_size = -1;
     }
-    if (bios_size < 0 || bios_size > MAGNUM_BIOS_SIZE) {
-        fprintf(stderr, "qemu: Could not load MIPS bios '%s'\n",
-                bios_name);
+    if ((bios_size < 0 || bios_size > MAGNUM_BIOS_SIZE) && !qtest_enabled()) {
+        error_report("Could not load MIPS bios '%s'", bios_name);
         exit(1);
     }
 
@@ -201,7 +227,9 @@ static void mips_jazz_init(MemoryRegion *address_space,
     pcspk_init(isa_bus, pit);
 
     /* ISA IO space at 0x90000000 */
-    isa_mmio_init(0x90000000, 0x01000000);
+    memory_region_init_alias(isa, NULL, "isa_mmio",
+                             get_system_io(), 0, 0x01000000);
+    memory_region_add_subregion(address_space, 0x90000000, isa);
     isa_mem_base = 0x11000000;
 
     /* Video card */
@@ -323,7 +351,6 @@ static QEMUMachine mips_magnum_machine = {
     .desc = "MIPS Magnum",
     .init = mips_magnum_init,
     .block_default_type = IF_SCSI,
-    DEFAULT_MACHINE_OPTIONS,
 };
 
 static QEMUMachine mips_pica61_machine = {
@@ -331,7 +358,6 @@ static QEMUMachine mips_pica61_machine = {
     .desc = "Acer Pica 61",
     .init = mips_pica61_init,
     .block_default_type = IF_SCSI,
-    DEFAULT_MACHINE_OPTIONS,
 };
 
 static void mips_jazz_machine_init(void)

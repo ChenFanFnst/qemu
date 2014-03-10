@@ -185,7 +185,7 @@ static void pm_update_sci(VT686PMState *s)
                    ACPI_BITMASK_POWER_BUTTON_ENABLE |
                    ACPI_BITMASK_GLOBAL_LOCK_ENABLE |
                    ACPI_BITMASK_TIMER_ENABLE)) != 0);
-    qemu_set_irq(s->dev.irq[0], sci_level);
+    pci_set_irq(&s->dev, sci_level);
     /* schedule a timer interruption if needed */
     acpi_pm_tmr_update(&s->ar, (s->ar.pm1.evt.en & ACPI_BITMASK_TIMER_ENABLE) &&
                        !(pmsts & ACPI_BITMASK_TIMER_STATUS));
@@ -281,6 +281,7 @@ static void via_ac97_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_VIA_AC97;
     k->revision = 0x50;
     k->class_id = PCI_CLASS_MULTIMEDIA_AUDIO;
+    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "AC97";
 }
 
@@ -322,6 +323,7 @@ static void via_mc97_class_init(ObjectClass *klass, void *data)
     k->device_id = PCI_DEVICE_ID_VIA_MC97;
     k->class_id = PCI_CLASS_COMMUNICATION_OTHER;
     k->revision = 0x30;
+    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "MC97";
 }
 
@@ -367,8 +369,8 @@ static int vt82c686b_pm_initfn(PCIDevice *dev)
     return 0;
 }
 
-i2c_bus *vt82c686b_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
-                       qemu_irq sci_irq)
+I2CBus *vt82c686b_pm_init(PCIBus *bus, int devfn, uint32_t smb_io_base,
+                          qemu_irq sci_irq)
 {
     PCIDevice *dev;
     VT686PMState *s;
@@ -401,6 +403,7 @@ static void via_pm_class_init(ObjectClass *klass, void *data)
     k->revision = 0x40;
     dc->desc = "PM";
     dc->vmsd = &vmstate_acpi;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     dc->props = via_pm_properties;
 }
 
@@ -477,8 +480,12 @@ static void via_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_BRIDGE_ISA;
     k->revision = 0x40;
     dc->desc = "ISA bridge";
-    dc->no_user = 1;
     dc->vmsd = &vmstate_via;
+    /*
+     * Reason: part of VIA VT82C686 southbridge, needs to be wired up,
+     * e.g. by mips_fulong2e_init()
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo via_info = {

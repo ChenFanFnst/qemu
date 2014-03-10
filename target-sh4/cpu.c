@@ -144,7 +144,6 @@ static ObjectClass *superh_cpu_class_by_name(const char *cpu_model)
 SuperHCPU *cpu_sh4_init(const char *cpu_model)
 {
     SuperHCPU *cpu;
-    CPUSH4State *env;
     ObjectClass *oc;
 
     oc = superh_cpu_class_by_name(cpu_model);
@@ -152,8 +151,6 @@ SuperHCPU *cpu_sh4_init(const char *cpu_model)
         return NULL;
     }
     cpu = SUPERH_CPU(object_new(object_class_get_name(oc)));
-    env = &cpu->env;
-    env->cpu_model_str = cpu_model;
 
     object_property_set_bool(OBJECT(cpu), true, "realized", NULL);
 
@@ -240,10 +237,11 @@ static const TypeInfo sh7785_type_info = {
 
 static void superh_cpu_realizefn(DeviceState *dev, Error **errp)
 {
-    SuperHCPU *cpu = SUPERH_CPU(dev);
+    CPUState *cs = CPU(dev);
     SuperHCPUClass *scc = SUPERH_CPU_GET_CLASS(dev);
 
-    cpu_reset(CPU(cpu));
+    cpu_reset(cs);
+    qemu_init_vcpu(cs);
 
     scc->parent_realize(dev, errp);
 }
@@ -286,10 +284,13 @@ static void superh_cpu_class_init(ObjectClass *oc, void *data)
     cc->dump_state = superh_cpu_dump_state;
     cc->set_pc = superh_cpu_set_pc;
     cc->synchronize_from_tb = superh_cpu_synchronize_from_tb;
+    cc->gdb_read_register = superh_cpu_gdb_read_register;
+    cc->gdb_write_register = superh_cpu_gdb_write_register;
 #ifndef CONFIG_USER_ONLY
     cc->get_phys_page_debug = superh_cpu_get_phys_page_debug;
 #endif
     dc->vmsd = &vmstate_sh_cpu;
+    cc->gdb_num_core_regs = 59;
 }
 
 static const TypeInfo superh_cpu_type_info = {

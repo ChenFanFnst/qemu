@@ -46,7 +46,6 @@ extern int madvise(caddr_t, size_t, int);
 #endif
 
 #include "qemu-common.h"
-#include "trace.h"
 #include "qemu/sockets.h"
 #include "monitor/monitor.h"
 
@@ -206,6 +205,13 @@ int qemu_open(const char *name, int flags, ...)
         qemu_set_cloexec(ret);
     }
 #endif
+
+#ifdef O_DIRECT
+    if (ret == -1 && errno == EINVAL && (flags & O_DIRECT)) {
+        error_report("file system may not support O_DIRECT");
+        errno = EINVAL; /* in case it was clobbered */
+    }
+#endif /* O_DIRECT */
 
     return ret;
 }

@@ -25,30 +25,18 @@
 #include "qemu/log.h"
 #include "sysemu/sysemu.h"
 
-typedef struct CPUExistsArgs {
-    int64_t id;
-    bool found;
-} CPUExistsArgs;
-
-static void cpu_exist_cb(CPUState *cpu, void *data)
-{
-    CPUClass *klass = CPU_GET_CLASS(cpu);
-    CPUExistsArgs *arg = data;
-
-    if (klass->get_arch_id(cpu) == arg->id) {
-        arg->found = true;
-    }
-}
-
 bool cpu_exists(int64_t id)
 {
-    CPUExistsArgs data = {
-        .id = id,
-        .found = false,
-    };
+    CPUState *cpu;
 
-    qemu_for_each_cpu(cpu_exist_cb, &data);
-    return data.found;
+    CPU_FOREACH(cpu) {
+        CPUClass *cc = CPU_GET_CLASS(cpu);
+
+        if (cc->get_arch_id(cpu) == id) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool cpu_paging_enabled(const CPUState *cpu)
@@ -157,12 +145,24 @@ static int cpu_common_write_elf64_note(WriteCoreDumpFunction f,
 }
 
 
+static int cpu_common_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg)
+{
+    return 0;
+}
+
+static int cpu_common_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg)
+{
+    return 0;
+}
+
+
 void cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
                     int flags)
 {
     CPUClass *cc = CPU_GET_CLASS(cpu);
 
     if (cc->dump_state) {
+        cpu_synchronize_state(cpu);
         cc->dump_state(cpu, f, cpu_fprintf, flags);
     }
 }
@@ -217,13 +217,19 @@ static void cpu_common_realizefn(DeviceState *dev, Error **errp)
 {
     CPUState *cpu = CPU(dev);
 
-    qemu_init_vcpu(cpu);
-
     if (dev->hotplugged) {
         cpu_synchronize_post_init(cpu);
         notifier_list_notify(&cpu_added_notifiers, dev);
         cpu_resume(cpu);
     }
+}
+
+static void cpu_common_initfn(Object *obj)
+{
+    CPUState *cpu = CPU(obj);
+    CPUClass *cc = CPU_GET_CLASS(obj);
+
+    cpu->gdb_num_regs = cpu->gdb_num_g_regs = cc->gdb_num_core_regs;
 }
 
 static int64_t cpu_common_get_arch_id(CPUState *cpu)
@@ -245,14 +251,21 @@ static void cpu_class_init(ObjectClass *klass, void *data)
     k->write_elf32_note = cpu_common_write_elf32_note;
     k->write_elf64_qemunote = cpu_common_write_elf64_qemunote;
     k->write_elf64_note = cpu_common_write_elf64_note;
+    k->gdb_read_register = cpu_common_gdb_read_register;
+    k->gdb_write_register = cpu_common_gdb_write_register;
     dc->realize = cpu_common_realizefn;
-    dc->no_user = 1;
+    /*
+     * Reason: CPUs still need special care by board code: wiring up
+     * IRQs, adding reset handlers, halting non-first CPUs, ...
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo cpu_type_info = {
     .name = TYPE_CPU,
     .parent = TYPE_DEVICE,
     .instance_size = sizeof(CPUState),
+    .instance_init = cpu_common_initfn,
     .abstract = true,
     .class_size = sizeof(CPUClass),
     .class_init = cpu_class_init,

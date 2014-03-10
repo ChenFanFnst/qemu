@@ -410,7 +410,7 @@ static const MemoryRegionOps PPC_prep_io_ops = {
         .read = { PPC_prep_io_readb, PPC_prep_io_readw, PPC_prep_io_readl },
         .write = { PPC_prep_io_writeb, PPC_prep_io_writew, PPC_prep_io_writel },
     },
-    .endianness = DEVICE_LITTLE_ENDIAN,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 #define NVRAM_SIZE        0x2000
@@ -452,7 +452,7 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
     const char *kernel_filename = args->kernel_filename;
     const char *kernel_cmdline = args->kernel_cmdline;
     const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_device;
+    const char *boot_device = args->boot_order;
     MemoryRegion *sysmem = get_system_memory();
     PowerPCCPU *cpu = NULL;
     CPUPPCState *env = NULL;
@@ -656,7 +656,7 @@ static void ppc_prep_init(QEMUMachineInitArgs *args)
     sysctrl->reset_irq = cpu->env.irq_inputs[PPC6xx_INPUT_HRESET];
 
     portio_list_init(port_list, NULL, prep_portio_list, sysctrl, "prep");
-    portio_list_add(port_list, get_system_io(), 0x0);
+    portio_list_add(port_list, isa_address_space_io(isa), 0x0);
 
     /* PowerPC control and status register group */
 #if 0
@@ -691,7 +691,7 @@ static QEMUMachine prep_machine = {
     .desc = "PowerPC PREP platform",
     .init = ppc_prep_init,
     .max_cpus = MAX_CPUS,
-    DEFAULT_MACHINE_OPTIONS,
+    .default_boot_order = "cad",
 };
 
 static void prep_machine_init(void)

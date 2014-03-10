@@ -336,7 +336,7 @@ static bool _vmxnet3_assert_interrupt_line(VMXNET3State *s, uint32_t int_idx)
     }
 
     VMW_IRPRN("Asserting line for interrupt %u", int_idx);
-    qemu_set_irq(d->irq[int_idx], 1);
+    pci_irq_assert(d);
     return true;
 }
 
@@ -356,7 +356,7 @@ static void _vmxnet3_deassert_interrupt_line(VMXNET3State *s, int lidx)
     assert(!s->msi_used || !msi_enabled(d));
 
     VMW_IRPRN("Deasserting line for interrupt %u", lidx);
-    qemu_set_irq(d->irq[lidx], 0);
+    pci_irq_deassert(d);
 }
 
 static void vmxnet3_update_interrupt_line_state(VMXNET3State *s, int lidx)
@@ -528,7 +528,7 @@ vmxnet3_setup_tx_offloads(VMXNET3State *s)
         break;
 
     default:
-        assert(false);
+        g_assert_not_reached();
         return false;
     }
 
@@ -575,7 +575,7 @@ vmxnet3_on_tx_done_update_stats(VMXNET3State *s, int qidx,
             stats->ucastBytesTxOK += tot_len;
             break;
         default:
-            assert(false);
+            g_assert_not_reached();
         }
 
         if (s->offload_mode == VMXNET3_OM_TSO) {
@@ -599,7 +599,7 @@ vmxnet3_on_tx_done_update_stats(VMXNET3State *s, int qidx,
         break;
 
     default:
-        assert(false);
+        g_assert_not_reached();
     }
 }
 
@@ -634,7 +634,7 @@ vmxnet3_on_rx_done_update_stats(VMXNET3State *s,
             stats->ucastBytesRxOK += tot_len;
             break;
         default:
-            assert(false);
+            g_assert_not_reached();
         }
 
         if (tot_len > s->mtu) {
@@ -643,7 +643,7 @@ vmxnet3_on_rx_done_update_stats(VMXNET3State *s,
         }
         break;
     default:
-        assert(false);
+        g_assert_not_reached();
     }
 }
 
@@ -1106,7 +1106,7 @@ vmxnet3_io_bar0_read(void *opaque, hwaddr addr, unsigned size)
 {
     if (VMW_IS_MULTIREG_ADDR(addr, VMXNET3_REG_IMR,
                         VMXNET3_MAX_INTRS, VMXNET3_REG_ALIGN)) {
-        assert(false);
+        g_assert_not_reached();
     }
 
     VMW_CBPRN("BAR0 unknown read [%" PRIx64 "], size %d", addr, size);
@@ -1290,13 +1290,19 @@ static void vmxnet3_update_features(VMXNET3State *s)
               s->lro_supported, rxcso_supported,
               s->rx_vlan_stripping);
     if (s->peer_has_vhdr) {
-        tap_set_offload(qemu_get_queue(s->nic)->peer,
-                        rxcso_supported,
-                        s->lro_supported,
-                        s->lro_supported,
-                        0,
-                        0);
+        qemu_set_offload(qemu_get_queue(s->nic)->peer,
+                         rxcso_supported,
+                         s->lro_supported,
+                         s->lro_supported,
+                         0,
+                         0);
     }
+}
+
+static bool vmxnet3_verify_intx(VMXNET3State *s, int intx)
+{
+    return s->msix_used || s->msi_used || (intx ==
+           (pci_get_byte(s->parent_obj.config + PCI_INTERRUPT_PIN) - 1));
 }
 
 static void vmxnet3_activate_device(VMXNET3State *s)
@@ -1332,6 +1338,7 @@ static void vmxnet3_activate_device(VMXNET3State *s)
 
     s->event_int_idx =
         VMXNET3_READ_DRV_SHARED8(s->drv_shmem, devRead.intrConf.eventIntrIdx);
+    assert(vmxnet3_verify_intx(s, s->event_int_idx));
     VMW_CFPRN("Events interrupt line is %u", s->event_int_idx);
 
     s->auto_int_masking =
@@ -1364,6 +1371,7 @@ static void vmxnet3_activate_device(VMXNET3State *s)
         /* Read interrupt number for this TX queue */
         s->txq_descr[i].intr_idx =
             VMXNET3_READ_TX_QUEUE_DESCR8(qdescr_pa, conf.intrIdx);
+        assert(vmxnet3_verify_intx(s, s->txq_descr[i].intr_idx));
 
         VMW_CFPRN("TX Queue %d interrupt: %d", i, s->txq_descr[i].intr_idx);
 
@@ -1411,6 +1419,7 @@ static void vmxnet3_activate_device(VMXNET3State *s)
         /* Read interrupt number for this RX queue */
         s->rxq_descr[i].intr_idx =
             VMXNET3_READ_TX_QUEUE_DESCR8(qd_pa, conf.intrIdx);
+        assert(vmxnet3_verify_intx(s, s->rxq_descr[i].intr_idx));
 
         VMW_CFPRN("RX Queue %d interrupt: %d", i, s->rxq_descr[i].intr_idx);
 
@@ -1651,7 +1660,7 @@ vmxnet3_io_bar1_write(void *opaque,
     case VMXNET3_REG_ICR:
         VMW_CBPRN("Write BAR1 [VMXNET3_REG_ICR] = %" PRIx64 ", size %d",
                   val, size);
-        assert(false);
+        g_assert_not_reached();
         break;
 
     /* Event Cause Register */
@@ -1801,7 +1810,7 @@ vmxnet3_rx_filter_may_indicate(VMXNET3State *s, const void *data,
         break;
 
     default:
-        assert(false);
+        g_assert_not_reached();
     }
 
     return true;
@@ -1874,11 +1883,9 @@ static NetClientInfo net_vmxnet3_info = {
 
 static bool vmxnet3_peer_has_vnet_hdr(VMXNET3State *s)
 {
-    NetClientState *peer = qemu_get_queue(s->nic)->peer;
+    NetClientState *nc = qemu_get_queue(s->nic);
 
-    if ((NULL != peer)                              &&
-        (peer->info->type == NET_CLIENT_OPTIONS_KIND_TAP)   &&
-        tap_has_vnet_hdr(peer)) {
+    if (qemu_has_vnet_hdr(nc->peer)) {
         return true;
     }
 
@@ -1926,10 +1933,10 @@ static void vmxnet3_net_init(VMXNET3State *s)
     s->lro_supported = false;
 
     if (s->peer_has_vhdr) {
-        tap_set_vnet_hdr_len(qemu_get_queue(s->nic)->peer,
+        qemu_set_vnet_hdr_len(qemu_get_queue(s->nic)->peer,
             sizeof(struct virtio_net_hdr));
 
-        tap_using_vnet_hdr(qemu_get_queue(s->nic)->peer, 1);
+        qemu_using_vnet_hdr(qemu_get_queue(s->nic)->peer, 1);
     }
 
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
@@ -2453,6 +2460,7 @@ static void vmxnet3_class_init(ObjectClass *class, void *data)
     dc->reset = vmxnet3_qdev_reset;
     dc->vmsd = &vmstate_vmxnet3;
     dc->props = vmxnet3_properties;
+    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 
 static const TypeInfo vmxnet3_info = {

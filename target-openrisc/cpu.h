@@ -307,7 +307,7 @@ typedef struct CPUOpenRISCState {
 #ifndef CONFIG_USER_ONLY
     CPUOpenRISCTLBContext * tlb;
 
-    struct QEMUTimer *timer;
+    QEMUTimer *timer;
     uint32_t ttmr;          /* Timer tick mode register */
     uint32_t ttcr;          /* Timer tick count register */
 
@@ -350,6 +350,8 @@ void openrisc_cpu_do_interrupt(CPUState *cpu);
 void openrisc_cpu_dump_state(CPUState *cpu, FILE *f,
                              fprintf_function cpu_fprintf, int flags);
 hwaddr openrisc_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
+int openrisc_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
+int openrisc_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
 void openrisc_translate_init(void);
 int cpu_openrisc_handle_mmu_fault(CPUOpenRISCState *env,
                                   target_ulong address,
@@ -371,6 +373,7 @@ void cpu_openrisc_pic_init(OpenRISCCPU *cpu);
 /* hw/openrisc_timer.c */
 void cpu_openrisc_clock_init(OpenRISCCPU *cpu);
 void cpu_openrisc_count_update(OpenRISCCPU *cpu);
+void cpu_openrisc_timer_update(OpenRISCCPU *cpu);
 void cpu_openrisc_count_start(OpenRISCCPU *cpu);
 void cpu_openrisc_count_stop(OpenRISCCPU *cpu);
 

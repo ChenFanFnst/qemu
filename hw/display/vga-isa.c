@@ -67,7 +67,7 @@ static void vga_isa_realizefn(DeviceState *dev, Error **errp)
                                         isa_mem_base + 0x000a0000,
                                         vga_io_memory, 1);
     memory_region_set_coalescing(vga_io_memory);
-    s->con = graphic_console_init(DEVICE(dev), s->hw_ops, s);
+    s->con = graphic_console_init(DEVICE(dev), 0, s->hw_ops, s);
 
     vga_init_vbe(s, OBJECT(dev), isa_address_space(isadev));
     /* ROM BIOS */
@@ -87,6 +87,7 @@ static void vga_isa_class_initfn(ObjectClass *klass, void *data)
     dc->reset = vga_isa_reset;
     dc->vmsd = &vmstate_vga_common;
     dc->props = vga_isa_properties;
+    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
 static const TypeInfo vga_isa_info = {
