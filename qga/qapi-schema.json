@@ -626,6 +626,18 @@
   'returns': 'int' }
 
 ##
+# @guest-network-delete-interface:
+#
+# Set guest network interfaces
+#
+#
+# Since: 2.3
+##
+{ 'command': 'guest-network-delete-interface',
+  'data'   : {'name': 'str' },
+  'returns': 'int' }
+
+##
 # @GuestLogicalProcessor:
 #
 # @logical-id: Arbitrary guest-specific unique identifier of the VCPU.

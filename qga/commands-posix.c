@@ -1971,9 +1971,60 @@ int64_t qmp_guest_network_set_interface(GuestNetworkInterface2 *interface,
 
     return 0;
 }
+
+int64_t qmp_guest_network_delete_interface(const char *name, Error **errp)
+{
+    struct netcf_if *iface;
+    int ret = -1;
+    unsigned int flags = 0;
+
+    /* open netcf */
+    if (netcf == NULL) {
+        if (ncf_init(&netcf, NULL) != 0) {
+            error_setg(errp, "netcf init failed");
+            return ret;
+        }
+    }
+
+    iface = ncf_lookup_by_name(netcf, name);
+    if (!iface) {
+       error_setg(errp, "couldn't find interface named '%s'", name);
+       return ret;
+    }
+
+    if (ncf_if_status(iface, &flags) < 0) {
+        error_setg(errp, "netcf interface get status failed");
+        goto cleanup;
+    }
+
+    if (flags & NETCF_IFACE_ACTIVE) {
+        ret = ncf_if_down(iface);
+        if (ret < 0) {
+            error_setg(errp, "netcf interface stop failed");
+            goto cleanup;
+        }
+    }
+
+    ret = ncf_if_undefine(iface);
+    if (ret < 0) {
+        error_setg(errp, "netcf interface delete failed");
+        goto cleanup;
+    }
+
+    ret = 0;
+cleanup:
+    ncf_if_free(iface);
+    return ret;
+}
 #else
 int64_t qmp_guest_network_set_interface(GuestNetworkInterface2 *interface,
                                         Error **errp)
+{
+    error_set(errp, QERR_UNSUPPORTED);
+    return -1;
+}
+
+int64_t qmp_guest_network_delete_interface(const char *name, Error **errp)
 {
     error_set(errp, QERR_UNSUPPORTED);
     return -1;
