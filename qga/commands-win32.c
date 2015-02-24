@@ -446,6 +446,13 @@ int64_t qmp_guest_set_vcpus(GuestLogicalProcessorList *vcpus, Error **errp)
     return -1;
 }
 
+int64_t qmp_guest_network_set_interface(GuestNetworkInterface2 *interface,
+                                        Error **errp)
+{
+    error_set(errp, QERR_UNSUPPORTED);
+    return -1;
+}
+
 /* add unsupported commands to the blacklist */
 GList *ga_command_blacklist_init(GList *blacklist)
 {

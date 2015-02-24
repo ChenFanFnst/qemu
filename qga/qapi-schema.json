@@ -556,6 +556,7 @@
 { 'type': 'GuestIpAddress',
   'data': {'ip-address': 'str',
            'ip-address-type': 'GuestIpAddressType',
+           '*gateway': 'str',
            'prefix': 'int'} }
 
 ##
@@ -575,6 +576,31 @@
            '*ip-addresses': ['GuestIpAddress'] } }
 
 ##
+# @GuestInterfaceType:
+#
+# An enumeration of supported interface types
+#
+# @bond: bond device
+#
+# Since: 2.3
+##
+{ 'enum': 'GuestInterfaceType',
+  'data': [ 'bond' ] }
+
+##
+#
+#
+# Since: 2.3
+##
+{ 'type': 'GuestNetworkInterface2',
+  'data': {'type': 'GuestInterfaceType',
+           'name': 'str',
+           '*onboot': 'str',
+           '*ip-address': 'GuestIpAddress',
+           '*options': 'str',
+           'subInterfaces': ['GuestNetworkInterface'] } }
+
+##
 # @guest-network-get-interfaces:
 #
 # Get list of guest IP addresses, MAC addresses
@@ -586,6 +612,18 @@
 ##
 { 'command': 'guest-network-get-interfaces',
   'returns': ['GuestNetworkInterface'] }
+
+##
+# @guest-network-set-interface:
+#
+# Set guest network interface
+#
+#
+# Since: 2.3
+##
+{ 'command': 'guest-network-set-interface',
+  'data'   : {'interface': 'GuestNetworkInterface2' },
+  'returns': 'int' }
 
 ##
 # @GuestLogicalProcessor:

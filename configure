@@ -3618,6 +3618,18 @@ if test "$darwin" != "yes" -a "$mingw32" != "yes" -a "$solaris" != yes -a \
 fi
 
 ##########################################
+# Do we need netcf
+netcf=no
+cat > $TMPC << EOF
+#include <netcf.h>
+int main(void) { return 0; }
+EOF
+if compile_prog "" "-lnetcf" ; then
+    netcf=yes
+    libs_qga="$libs_qga -lnetcf"
+fi
+
+##########################################
 # spice probe
 if test "$spice" != "no" ; then
   cat > $TMPC << EOF
@@ -4695,6 +4707,10 @@ fi
 
 if test "$spice" = "yes" ; then
   echo "CONFIG_SPICE=y" >> $config_host_mak
+fi
+
+if test "$netcf" = "yes" ; then
+  echo "CONFIG_NETCF=y" >> $config_host_mak
 fi
 
 if test "$smartcard_nss" = "yes" ; then

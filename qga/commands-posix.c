@@ -46,6 +46,10 @@ extern char **environ;
 #include <sys/socket.h>
 #include <net/if.h>
 
+#ifdef CONFIG_NETCF
+#include <netcf.h>
+#endif
+
 #ifdef FIFREEZE
 #define CONFIG_FSFREEZE
 #endif
@@ -1718,6 +1722,263 @@ error:
     qapi_free_GuestNetworkInterfaceList(head);
     return NULL;
 }
+
+#ifdef CONFIG_NETCF
+static const char *interface_type_string[] = {
+    "bond",
+};
+
+static const char *ip_address_type_string[] = {
+    "ipv4",
+    "ipv6",
+};
+
+static char *parse_options(const char *str, const char *needle)
+{
+    char *start, *end, *buffer = NULL;
+    char *ret = NULL;
+
+    buffer = g_strdup(str);
+    start = buffer;
+    if ((start = strstr(start, needle))) {
+        start += strlen(needle);
+        end = strchr(start, ' ');
+        if (end) {
+            *end = '\0';
+        }
+        if (strlen(start) == 0) {
+            goto cleanup;
+        }
+        ret = g_strdup(start);
+    }
+
+cleanup:
+    g_free(buffer);
+    return ret;
+}
+
+/**
+ * @buffer: xml string data to be formatted
+ * @indent: indent number relative to first line
+ *
+ */
+static void adjust_indent(char **buffer, int indent)
+{
+    char spaces[1024];
+    int i;
+
+    if (!*buffer) {
+        return;
+    }
+
+    if (indent < 0 || indent >= 1024) {
+        return;
+    }
+    memset(spaces, 0, sizeof(spaces));
+    for (i = 0; i < indent; i++) {
+        spaces[i] = ' ';
+    }
+
+    sprintf(*buffer + strlen(*buffer), "%s", spaces);
+}
+
+static char *create_bond_interface(GuestNetworkInterface2 *interface)
+{
+    char *target_xml;
+
+    target_xml = g_malloc0(1024);
+    if (!target_xml) {
+        return NULL;
+    }
+
+    sprintf(target_xml, "<interface type='%s' name='%s'>\n",
+            interface_type_string[interface->type], interface->name);
+    adjust_indent(&target_xml, 2);
+    sprintf(target_xml + strlen(target_xml), "<start mode='%s'/>\n",
+            interface->has_onboot ? interface->onboot : "none");
+    if (interface->has_ip_address) {
+        GuestIpAddress *address_item = interface->ip_address;
+
+        adjust_indent(&target_xml, 2);
+        sprintf(target_xml + strlen(target_xml), "<protocol family='%s'>\n",
+                ip_address_type_string[address_item->ip_address_type]);
+        adjust_indent(&target_xml, 4);
+        sprintf(target_xml + strlen(target_xml), "<ip address='%s' prefix='%" PRId64 "'/>\n",
+                address_item->ip_address, address_item->prefix);
+        if (address_item->has_gateway) {
+            adjust_indent(&target_xml, 4);
+            sprintf(target_xml + strlen(target_xml), "<route gateway='%s'/>\n",
+                    address_item->gateway);
+        }
+        adjust_indent(&target_xml, 2);
+        sprintf(target_xml + strlen(target_xml), "%s\n", "</protocol>");
+    }
+
+    adjust_indent(&target_xml, 2);
+    if (interface->has_options) {
+        char *value;
+
+        value = parse_options(interface->options, "mode=");
+        if (value) {
+            sprintf(target_xml + strlen(target_xml), "<bond mode='%s'>\n",
+                    value);
+            g_free(value);
+        } else {
+            sprintf(target_xml + strlen(target_xml), "%s\n", "<bond>");
+        }
+
+        value = parse_options(interface->options, "miimon=");
+        if (value) {
+            adjust_indent(&target_xml, 4);
+            sprintf(target_xml + strlen(target_xml), "<miimon freq='%s'",
+                   value);
+            g_free(value);
+
+            value = parse_options(interface->options, "updelay=");
+            if (value) {
+                sprintf(target_xml + strlen(target_xml), " updelay='%s'",
+                        value);
+                g_free(value);
+            }
+            value = parse_options(interface->options, "downdelay=");
+            if (value) {
+                sprintf(target_xml + strlen(target_xml), " downdelay='%s'",
+                        value);
+                g_free(value);
+            }
+            value = parse_options(interface->options, "use_carrier=");
+            if (value) {
+                sprintf(target_xml + strlen(target_xml), " carrier='%s'",
+                        value);
+                g_free(value);
+            }
+
+            sprintf(target_xml + strlen(target_xml), "%s\n", "/>");
+        }
+
+        value = parse_options(interface->options, "arp_interval=");
+        if (value) {
+            adjust_indent(&target_xml, 4);
+            sprintf(target_xml + strlen(target_xml), "<arpmon interval='%s'",
+                    value);
+            g_free(value);
+
+            value = parse_options(interface->options, "arp_ip_target=");
+            if (value) {
+                sprintf(target_xml + strlen(target_xml), " target='%s'",
+                        value);
+                g_free(value);
+            }
+
+            value = parse_options(interface->options, "arp_validate=");
+            if (value) {
+                sprintf(target_xml + strlen(target_xml), " validate='%s'",
+                        value);
+                g_free(value);
+            }
+
+            sprintf(target_xml + strlen(target_xml), "%s\n", "/>");
+        }
+    } else {
+        sprintf(target_xml + strlen(target_xml), "%s\n", "<bond>");
+    }
+
+    if (interface->subInterfaces) {
+        GuestNetworkInterfaceList *head = interface->subInterfaces;
+
+        for (; head; head = head->next) {
+            adjust_indent(&target_xml, 4);
+            sprintf(target_xml + strlen(target_xml),
+                    "<interface type='ethernet' name='%s'/>\n",
+                    head->value->name);
+        }
+    }
+
+    adjust_indent(&target_xml, 2);
+    sprintf(target_xml + strlen(target_xml), "%s\n", "</bond>");
+    sprintf(target_xml + strlen(target_xml), "%s\n", "</interface>");
+
+    return target_xml;
+}
+
+static struct netcf *netcf;
+
+static void create_interface(GuestNetworkInterface2 *interface, Error **errp)
+{
+    int ret = -1;
+    struct netcf_if *iface;
+    unsigned int flags = 0;
+    char *target_xml;
+
+    /* open netcf */
+    if (netcf == NULL) {
+        if (ncf_init(&netcf, NULL) != 0) {
+            error_setg(errp, "netcf init failed");
+            return;
+        }
+    }
+
+    if (interface->type != GUEST_INTERFACE_TYPE_BOND) {
+        error_setg(errp, "interface type is not supported, only support 'bond' type");
+        return;
+    }
+
+   target_xml = create_bond_interface(interface);
+   if (!target_xml) {
+        error_setg(errp, "no enough memory spaces");
+        return;
+    }
+
+    iface = ncf_define(netcf, target_xml);
+    if (!iface) {
+        error_setg(errp, "netcf interface define failed");
+        g_free(target_xml);
+        goto cleanup;
+    }
+
+    g_free(target_xml);
+
+    if (ncf_if_status(iface, &flags) < 0) {
+        error_setg(errp, "netcf interface get status failed");
+        goto cleanup;
+    }
+
+    if (flags & NETCF_IFACE_ACTIVE) {
+        error_setg(errp, "interface is already running");
+        goto cleanup;
+    }
+
+    ret = ncf_if_up(iface);
+    if (ret < 0) {
+        error_setg(errp, "netcf interface up failed");
+        goto cleanup;
+    }
+
+ cleanup:
+    ncf_if_free(iface);
+}
+
+int64_t qmp_guest_network_set_interface(GuestNetworkInterface2 *interface,
+                                        Error **errp)
+{
+    Error *local_err = NULL;
+
+    create_interface(interface, &local_err);
+    if (local_err != NULL) {
+        error_propagate(errp, local_err);
+        return -1;
+    }
+
+    return 0;
+}
+#else
+int64_t qmp_guest_network_set_interface(GuestNetworkInterface2 *interface,
+                                        Error **errp)
+{
+    error_set(errp, QERR_UNSUPPORTED);
+    return -1;
+}
+#endif
 
 #define SYSCONF_EXACT(name, errp) sysconf_exact((name), #name, (errp))
 
