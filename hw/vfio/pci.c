@@ -2724,12 +2724,43 @@ static int vfio_add_std_cap(VFIOPCIDevice *vdev, uint8_t pos)
     return 0;
 }
 
+static int vfio_setup_aer(VFIOPCIDevice *vdev, int pos, uint16_t size)
+{
+    PCIDevice *pdev = &vdev->pdev;
+    uint8_t *exp_cap = pdev->config + pdev->exp.exp_cap;
+    uint32_t severity, errcap;
+    int ret;
+
+    errcap = vfio_pci_read_config(pdev, pdev->exp.aer_cap + PCI_ERR_CAP, 4);
+    /* The ability to record multiple headers is depending on
+       the state of the Multiple Header Recording Capable bit and
+       enabled by the Multiple Header Recording Enable bit */
+    if ((errcap & PCI_ERR_CAP_MHRC) &&
+        (errcap & PCI_ERR_CAP_MHRE)) {
+        pdev->exp.aer_log.log_max = PCIE_AER_LOG_MAX_DEFAULT;
+    } else {
+        pdev->exp.aer_log.log_max = 0;
+    }
+    ret = pcie_aer_init(pdev, pos, size);
+    if (ret) {
+        return ret;
+    }
+
+    /* load physical registers */
+    severity = vfio_pci_read_config(pdev,
+                   pdev->exp.aer_cap + PCI_ERR_UNCOR_SEVER, 4);
+    pci_long_test_and_clear_mask(exp_cap + PCI_ERR_UNCOR_SEVER, ~severity);
+
+    return 0;
+}
+
 static int vfio_add_ext_cap(VFIOPCIDevice *vdev, const uint8_t *config)
 {
     PCIDevice *pdev = &vdev->pdev;
     uint32_t header;
     uint16_t cap_id, next, size;
     uint8_t cap_ver;
+    int ret = 0;
 
     for (next = PCI_CONFIG_SPACE_SIZE; next;
          next = PCI_EXT_CAP_NEXT(pci_get_long(config + next))) {
@@ -2745,7 +2776,19 @@ static int vfio_add_ext_cap(VFIOPCIDevice *vdev, const uint8_t *config)
          */
         size = vfio_ext_cap_max_size(config, next);
 
-        pcie_add_capability(pdev, cap_id, cap_ver, next, size);
+        switch (cap_id) {
+        case PCI_EXT_CAP_ID_ERR:
+            ret = vfio_setup_aer(vdev, next, size);
+            break;
+        default:
+            pcie_add_capability(pdev, cap_id, cap_ver, next, size);
+            break;
+        }
+
+        if (ret) {
+            return ret;
+        }
+
         if (next == PCI_CONFIG_SPACE_SIZE) {
             /* Begin the rebuild, we should set the next offset zero. */
             pci_set_long(pdev->config + next, PCI_EXT_CAP(cap_id, cap_ver, 0));
