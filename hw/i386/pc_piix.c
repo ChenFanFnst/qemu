@@ -307,6 +307,11 @@ static void pc_init1(MachineState *machine,
 
 static void pc_init_pci(MachineState *machine)
 {
+    static GlobalProperty pc_compat_props[] = {
+        PC_I440FX_COMPAT,
+        { /* end of list */ }
+    };
+    qdev_prop_register_global_list(pc_compat_props);
     pc_init1(machine, 1, 1);
 }
 
@@ -531,6 +536,10 @@ static QEMUMachine pc_i440fx_machine_v2_2 = {
     PC_I440FX_2_2_MACHINE_OPTIONS,
     .name = "pc-i440fx-2.2",
     .init = pc_init_pci_2_2,
+    .compat_props = (GlobalProperty[]) {
+        HW_COMPAT_2_2,
+        { /* end of list */ }
+    },
 };
 
 #define PC_I440FX_2_1_MACHINE_OPTIONS                           \

@@ -1,7 +1,17 @@
 #ifndef HW_COMPAT_H
 #define HW_COMPAT_H
 
+#define HW_COMPAT_2_2 PC_I440FX_COMPAT
+
+#define PC_I440FX_COMPAT \
+        {\
+            .driver   = "vfio-pci",\
+            .property = "x-aer",\
+            .value    = "off",\
+        }
+
 #define HW_COMPAT_2_1 \
+        HW_COMPAT_2_2, \
         {\
             .driver   = "intel-hda",\
             .property = "old_msi_addr",\
