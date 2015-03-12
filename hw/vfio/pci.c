@@ -159,6 +159,8 @@ typedef struct VFIOPCIDevice {
 #define VFIO_FEATURE_ENABLE_VGA (1 << VFIO_FEATURE_ENABLE_VGA_BIT)
 #define VFIO_FEATURE_ENABLE_REQ_BIT 1
 #define VFIO_FEATURE_ENABLE_REQ (1 << VFIO_FEATURE_ENABLE_REQ_BIT)
+#define VFIO_FEATURE_ENABLE_AER_BIT 2
+#define VFIO_FEATURE_ENABLE_AER (1 << VFIO_FEATURE_ENABLE_AER_BIT)
     int32_t bootindex;
     uint8_t pm_cap;
     bool has_vga;
@@ -2731,6 +2733,10 @@ static int vfio_setup_aer(VFIOPCIDevice *vdev, int pos, uint16_t size)
     uint32_t severity, errcap;
     int ret;
 
+    if (!(vdev->features & VFIO_FEATURE_ENABLE_AER)) {
+        return 0;
+    }
+
     errcap = vfio_pci_read_config(pdev, pdev->exp.aer_cap + PCI_ERR_CAP, 4);
     /* The ability to record multiple headers is depending on
        the state of the Multiple Header Recording Capable bit and
@@ -3691,6 +3697,8 @@ static Property vfio_pci_dev_properties[] = {
                     VFIO_FEATURE_ENABLE_VGA_BIT, false),
     DEFINE_PROP_BIT("x-req", VFIOPCIDevice, features,
                     VFIO_FEATURE_ENABLE_REQ_BIT, true),
+    DEFINE_PROP_BIT("x-aer", VFIOPCIDevice, features,
+                    VFIO_FEATURE_ENABLE_AER_BIT, true),
     DEFINE_PROP_INT32("bootindex", VFIOPCIDevice, bootindex, -1),
     DEFINE_PROP_BOOL("x-mmap", VFIOPCIDevice, vbasedev.allow_mmap, true),
     /*
