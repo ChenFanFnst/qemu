@@ -43,7 +43,6 @@
 #include "hw/ide/pci.h"
 #include "hw/ide/ahci.h"
 #include "hw/usb.h"
-#include "hw/cpu/icc_bus.h"
 #include "qemu/error-report.h"
 
 /* ICH9 AHCI has 6 ports */
@@ -85,7 +84,6 @@ static void pc_q35_init(MachineState *machine)
     int i;
     ICH9LPCState *ich9_lpc;
     PCIDevice *ahci;
-    DeviceState *icc_bridge;
     PcGuestInfo *guest_info;
     ram_addr_t lowmem;
     DriveInfo *hd[MAX_SATA_PORTS];
@@ -132,11 +130,7 @@ static void pc_q35_init(MachineState *machine)
         exit(1);
     }
 
-    icc_bridge = qdev_create(NULL, TYPE_ICC_BRIDGE);
-    object_property_add_child(qdev_get_machine(), "icc-bridge",
-                              OBJECT(icc_bridge), NULL);
-
-    pc_cpus_init(machine->cpu_model, icc_bridge);
+    pc_cpus_init(machine->cpu_model);
     pc_acpi_init("q35-acpi-dsdt.aml");
 
     kvmclock_create();
@@ -240,7 +234,6 @@ static void pc_q35_init(MachineState *machine)
     if (pci_enabled) {
         ioapic_init_gsi(gsi_state, "q35");
     }
-    qdev_init_nofail(icc_bridge);
 
     pc_register_ferr_irq(gsi[13]);
 

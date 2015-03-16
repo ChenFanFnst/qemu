@@ -58,7 +58,6 @@
 #include "qemu/config-file.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/cpu_hotplug.h"
-#include "hw/cpu/icc_bus.h"
 #include "hw/boards.h"
 #include "hw/pci/pci_host.h"
 #include "acpi-build.h"
@@ -66,6 +65,7 @@
 #include "trace.h"
 #include "qapi/visitor.h"
 #include "qapi-visit.h"
+#include "hw/i386/apic_internal.h"
 
 /* debug PC/ISA interrupts */
 //#define DEBUG_IRQ
@@ -991,23 +991,15 @@ void pc_acpi_smi_interrupt(void *opaque, int irq, int level)
 }
 
 static X86CPU *pc_new_cpu(const char *cpu_model, int64_t apic_id,
-                          DeviceState *icc_bridge, Error **errp)
+                          Error **errp)
 {
     X86CPU *cpu = NULL;
     Error *local_err = NULL;
-
-    if (icc_bridge == NULL) {
-        error_setg(&local_err, "Invalid icc-bridge value");
-        goto out;
-    }
 
     cpu = cpu_x86_create(cpu_model, &local_err);
     if (local_err != NULL) {
         goto out;
     }
-
-    qdev_set_parent_bus(DEVICE(cpu), qdev_get_child_bus(icc_bridge, "icc"));
-    object_unref(OBJECT(cpu));
 
     object_property_set_int(OBJECT(cpu), apic_id, "apic-id", &local_err);
     object_property_set_bool(OBJECT(cpu), true, "realized", &local_err);
@@ -1025,7 +1017,6 @@ static const char *current_cpu_model;
 
 void pc_hot_add_cpu(const int64_t id, Error **errp)
 {
-    DeviceState *icc_bridge;
     int64_t apic_id = x86_cpu_apic_id_from_index(id);
 
     if (id < 0) {
@@ -1052,17 +1043,16 @@ void pc_hot_add_cpu(const int64_t id, Error **errp)
         return;
     }
 
-    icc_bridge = DEVICE(object_resolve_path_type("icc-bridge",
-                                                 TYPE_ICC_BRIDGE, NULL));
-    pc_new_cpu(current_cpu_model, apic_id, icc_bridge, errp);
+    pc_new_cpu(current_cpu_model, apic_id, errp);
 }
 
-void pc_cpus_init(const char *cpu_model, DeviceState *icc_bridge)
+void pc_cpus_init(const char *cpu_model)
 {
     int i;
     X86CPU *cpu = NULL;
     Error *error = NULL;
     unsigned long apic_id_limit;
+    APICCommonState *apic = NULL;
 
     /* init CPUs */
     if (cpu_model == NULL) {
@@ -1083,7 +1073,7 @@ void pc_cpus_init(const char *cpu_model, DeviceState *icc_bridge)
 
     for (i = 0; i < smp_cpus; i++) {
         cpu = pc_new_cpu(cpu_model, x86_cpu_apic_id_from_index(i),
-                         icc_bridge, &error);
+                         &error);
         if (error) {
             error_report_err(error);
             exit(1);
@@ -1093,8 +1083,11 @@ void pc_cpus_init(const char *cpu_model, DeviceState *icc_bridge)
     /* map APIC MMIO area if CPU has APIC */
     if (cpu && cpu->apic_state) {
         /* XXX: what if the base changes? */
-        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(icc_bridge), 0,
-                                APIC_DEFAULT_ADDRESS, 0x1000);
+        apic = APIC_COMMON(cpu->apic_state);
+        memory_region_add_subregion_overlap(CPU(cpu)->as->root,
+                                            APIC_DEFAULT_ADDRESS,
+                                            &apic->io_memory,
+                                            0x1000);
     }
 
     /* tell smbios about cpuid version and features */
