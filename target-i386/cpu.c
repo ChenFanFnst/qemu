@@ -42,7 +42,6 @@
 
 #include "sysemu/sysemu.h"
 #include "hw/qdev-properties.h"
-#include "hw/cpu/icc_bus.h"
 #ifndef CONFIG_USER_ONLY
 #include "hw/xen/xen.h"
 #include "hw/i386/apic_internal.h"
@@ -3011,7 +3010,6 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
 
     xcc->parent_realize = dc->realize;
     dc->realize = x86_cpu_realizefn;
-    dc->bus_type = TYPE_ICC_BUS;
     dc->props = x86_cpu_properties;
 
     xcc->parent_reset = cc->reset;

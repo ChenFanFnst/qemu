@@ -302,7 +302,6 @@ static void apic_common_realize(DeviceState *dev, Error **errp)
     APICCommonClass *info;
     static DeviceState *vapic;
     static int apic_no;
-    static bool mmio_registered;
 
     if (apic_no >= MAX_APICS) {
         error_setg(errp, "%s initialization failed.",
@@ -313,11 +312,11 @@ static void apic_common_realize(DeviceState *dev, Error **errp)
 
     info = APIC_COMMON_GET_CLASS(s);
     info->realize(dev, errp);
-    if (!mmio_registered) {
-        ICCBus *b = ICC_BUS(qdev_get_parent_bus(dev));
-        memory_region_add_subregion(b->apic_address_space, 0, &s->io_memory);
-        mmio_registered = true;
-    }
+
+    memory_region_add_subregion_overlap(CPU(s->cpu)->as->root,
+                                        APIC_DEFAULT_ADDRESS,
+                                        &s->io_memory,
+                                        0x1000);
 
     /* Note: We need at least 1M to map the VAPIC option ROM */
     if (!vapic && s->vapic_control & VAPIC_ENABLE_MASK &&
@@ -433,13 +432,12 @@ static Property apic_properties_common[] = {
 
 static void apic_common_class_init(ObjectClass *klass, void *data)
 {
-    ICCDeviceClass *idc = ICC_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->vmsd = &vmstate_apic_common;
     dc->reset = apic_reset_common;
     dc->props = apic_properties_common;
-    idc->realize = apic_common_realize;
+    dc->realize = apic_common_realize;
     /*
      * Reason: APIC and CPU need to be wired up by
      * x86_cpu_apic_create()
@@ -449,7 +447,7 @@ static void apic_common_class_init(ObjectClass *klass, void *data)
 
 static const TypeInfo apic_common_type = {
     .name = TYPE_APIC_COMMON,
-    .parent = TYPE_ICC_DEVICE,
+    .parent = TYPE_DEVICE,
     .instance_size = sizeof(APICCommonState),
     .class_size = sizeof(APICCommonClass),
     .class_init = apic_common_class_init,
