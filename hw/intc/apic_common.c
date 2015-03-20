@@ -313,6 +313,13 @@ static void apic_common_realize(DeviceState *dev, Error **errp)
     info = APIC_COMMON_GET_CLASS(s);
     info->realize(dev, errp);
 
+    if (!kvm_irqchip_in_kernel()) {
+        memory_region_add_subregion_overlap(CPU(s->cpu)->as->root,
+                                            APIC_DEFAULT_ADDRESS,
+                                            &s->io_memory,
+                                            0x1000);
+    }
+
     /* Note: We need at least 1M to map the VAPIC option ROM */
     if (!vapic && s->vapic_control & VAPIC_ENABLE_MASK &&
         ram_size >= 1024 * 1024) {

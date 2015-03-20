@@ -1052,7 +1052,6 @@ void pc_cpus_init(const char *cpu_model)
     X86CPU *cpu = NULL;
     Error *error = NULL;
     unsigned long apic_id_limit;
-    APICCommonState *apic = NULL;
 
     /* init CPUs */
     if (cpu_model == NULL) {
@@ -1078,16 +1077,6 @@ void pc_cpus_init(const char *cpu_model)
             error_report_err(error);
             exit(1);
         }
-    }
-
-    /* map APIC MMIO area if CPU has APIC */
-    if (cpu && cpu->apic_state) {
-        /* XXX: what if the base changes? */
-        apic = APIC_COMMON(cpu->apic_state);
-        memory_region_add_subregion_overlap(CPU(cpu)->as->root,
-                                            APIC_DEFAULT_ADDRESS,
-                                            &apic->io_memory,
-                                            0x1000);
     }
 
     /* tell smbios about cpuid version and features */
