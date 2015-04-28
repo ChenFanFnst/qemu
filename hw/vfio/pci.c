@@ -154,6 +154,8 @@ typedef struct VFIOPCIDevice {
     PCIHostDeviceAddress host;
     EventNotifier err_notifier;
     EventNotifier req_notifier;
+
+    Notifier sec_bus_reset_notifier;
     uint32_t features;
 #define VFIO_FEATURE_ENABLE_VGA_BIT 0
 #define VFIO_FEATURE_ENABLE_VGA (1 << VFIO_FEATURE_ENABLE_VGA_BIT)
@@ -2621,6 +2623,13 @@ static int vfio_setup_pcie_cap(VFIOPCIDevice *vdev, int pos, uint8_t size)
     return pos;
 }
 
+static bool vfio_pci_host_match(PCIHostDeviceAddress *host1,
+                                PCIHostDeviceAddress *host2)
+{
+    return (host1->domain == host2->domain && host1->bus == host2->bus &&
+            host1->slot == host2->slot && host1->function == host2->function);
+}
+
 static void vfio_check_pcie_flr(VFIOPCIDevice *vdev, uint8_t pos)
 {
     uint32_t cap = pci_get_long(vdev->pdev.config + pos + PCI_EXP_DEVCAP);
@@ -2768,21 +2777,121 @@ static int vfio_add_std_cap(VFIOPCIDevice *vdev, uint8_t pos)
     return 0;
 }
 
+static int vfio_aer_validate_devices(DeviceState *dev,
+                                     void *opaque)
+{
+    VFIOPCIDevice *vdev;
+    int i;
+    bool found = false;
+    struct vfio_pci_hot_reset_info *info = opaque;
+    struct vfio_pci_dependent_device *devices = &info->devices[0];
+
+    if (!object_dynamic_cast(OBJECT(dev), "vfio-pci")) {
+        return 0;
+    }
+
+    vdev = DO_UPCAST(VFIOPCIDevice, pdev, PCI_DEVICE(dev));
+    for (i = 0; i < info->count; i++) {
+        PCIHostDeviceAddress host;
+
+        host.domain = devices[i].segment;
+        host.bus = devices[i].bus;
+        host.slot = PCI_SLOT(devices[i].devfn);
+        host.function = PCI_FUNC(devices[i].devfn);
+
+        if (vfio_pci_host_match(&host, &vdev->host)) {
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        error_report("vfio: Cannot reset parent bus with AER supported,"
+                     "depends on device %s which is not contained.",
+                      vdev->vbasedev.name);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void vfio_pci_host_bus_reset(Notifier *n, void *opaque)
+{
+    VFIOPCIDevice *vdev = container_of(n, VFIOPCIDevice, sec_bus_reset_notifier);
+
+    if () {
+
+    }
+}
+
 static int vfio_setup_aer(VFIOPCIDevice *vdev, int pos, uint16_t size)
 {
     PCIDevice *pdev = &vdev->pdev;
     uint8_t *exp_cap = pdev->config + pdev->exp.exp_cap;
     uint32_t severity, errcap;
-    int ret;
+    int ret, i;
+    struct vfio_pci_hot_reset_info info;
+    struct vfio_pci_dependent_device *devices = NULL;
+    VFIOGroup *group;
 
     if (!(vdev->features & VFIO_FEATURE_ENABLE_AER)) {
         return 0;
     }
 
+    /*
+     * Check the affected devices by virtual bus reset are contained in
+     * the set of groups.
+     */
+    ret = vfio_get_hot_reset_info(vdev, &info);
+    if (ret < 0) {
+        return -1;
+    }
+    devices = &info.devices[0];
+
+    /* Verify that we have all the groups required */
+    for (i = 0; i < info.count; i++) {
+        PCIHostDeviceAddress host;
+
+        host.domain = devices[i].segment;
+        host.bus = devices[i].bus;
+        host.slot = PCI_SLOT(devices[i].devfn);
+        host.function = PCI_FUNC(devices[i].devfn);
+
+        if (vfio_pci_host_match(&host, &vdev->host)) {
+            continue;
+        }
+
+        QLIST_FOREACH(group, &vfio_group_list, next) {
+            if (group->groupid == devices[i].group_id) {
+                break;
+            }
+        }
+
+        if (!group) {
+            if (!vdev->has_pm_reset) {
+                error_report("vfio: Cannot reset device %s with AER supported,"
+                             "depends on group %d which is not owned.",
+                             vdev->vbasedev.name, devices[i].group_id);
+            }
+            ret = -EPERM;
+            goto out;
+        }
+    }
+
+    /* Verify that we have all the affected devices under the bus */
+    ret = qbus_walk_children(BUS(pdev->bus), NULL, NULL,
+                             vfio_aer_validate_devices,
+                             NULL, &info);
+    if (ret < 0) {
+        goto out;
+    }
+
     errcap = vfio_pci_read_config(pdev, pdev->exp.aer_cap + PCI_ERR_CAP, 4);
-    /* The ability to record multiple headers is depending on
-       the state of the Multiple Header Recording Capable bit and
-       enabled by the Multiple Header Recording Enable bit */
+    /*
+     * The ability to record multiple headers is depending on
+     * the state of the Multiple Header Recording Capable bit and
+     * enabled by the Multiple Header Recording Enable bit.
+     */
     if ((errcap & PCI_ERR_CAP_MHRC) &&
         (errcap & PCI_ERR_CAP_MHRE)) {
         pdev->exp.aer_log.log_max = PCIE_AER_LOG_MAX_DEFAULT;
@@ -2799,7 +2908,14 @@ static int vfio_setup_aer(VFIOPCIDevice *vdev, int pos, uint16_t size)
                    pdev->exp.aer_cap + PCI_ERR_UNCOR_SEVER, 4);
     pci_long_test_and_clear_mask(exp_cap + PCI_ERR_UNCOR_SEVER, ~severity);
 
-    return 0;
+    vdev->sec_bus_reset_notifier.notify = vfio_pci_host_bus_reset;
+    pci_bus_add_reset_notifier(pdev->bus, &vdev->sec_bus_reset_notifier);
+
+    ret = 0;
+
+out:
+    g_free(devices);
+    return ret;
 }
 
 static int vfio_add_ext_cap(VFIOPCIDevice *vdev, const uint8_t *config)
@@ -2923,13 +3039,6 @@ static void vfio_pci_pre_reset(VFIOPCIDevice *vdev)
 static void vfio_pci_post_reset(VFIOPCIDevice *vdev)
 {
     vfio_enable_intx(vdev);
-}
-
-static bool vfio_pci_host_match(PCIHostDeviceAddress *host1,
-                                PCIHostDeviceAddress *host2)
-{
-    return (host1->domain == host2->domain && host1->bus == host2->bus &&
-            host1->slot == host2->slot && host1->function == host2->function);
 }
 
 static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single)
