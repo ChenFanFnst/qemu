@@ -2651,6 +2651,48 @@ static void vfio_check_af_flr(VFIOPCIDevice *vdev, uint8_t pos)
     }
 }
 
+/*
+ * return error with negative, return device count with positive,
+ * the params devices fill with the info.
+ *
+ */
+static int vfio_get_hot_reset_info(VFIOPCIDevice *vdev,
+                                   struct vfio_pci_hot_reset_info *info)
+{
+    int ret, count;
+
+    memset(info, 0, sizeof(*info));
+
+    info->argsz = sizeof(*info);
+
+    ret = ioctl(vdev->vbasedev.fd, VFIO_DEVICE_GET_PCI_HOT_RESET_INFO, info);
+    if (ret && errno != ENOSPC) {
+        ret = -errno;
+        if (!vdev->has_pm_reset) {
+            error_report("vfio: Cannot reset device %04x:%02x:%02x.%x, "
+                         "no available reset mechanism.", vdev->host.domain,
+                         vdev->host.bus, vdev->host.slot, vdev->host.function);
+        }
+        return ret;
+    }
+
+    count = info->count;
+
+    info = g_realloc(info, sizeof(*info) +
+                     (count * sizeof(struct vfio_pci_dependent_device)));
+    info->argsz = sizeof(*info) +
+                  (count * sizeof(struct vfio_pci_dependent_device));
+
+    ret = ioctl(vdev->vbasedev.fd, VFIO_DEVICE_GET_PCI_HOT_RESET_INFO, info);
+    if (ret) {
+        ret = -errno;
+        error_report("vfio: hot reset info failed: %m");
+        return ret;
+    }
+
+    return count;
+}
+
 static int vfio_add_std_cap(VFIOPCIDevice *vdev, uint8_t pos)
 {
     PCIDevice *pdev = &vdev->pdev;
@@ -2893,8 +2935,8 @@ static bool vfio_pci_host_match(PCIHostDeviceAddress *host1,
 static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single)
 {
     VFIOGroup *group;
-    struct vfio_pci_hot_reset_info *info;
-    struct vfio_pci_dependent_device *devices;
+    struct vfio_pci_hot_reset_info info;
+    struct vfio_pci_dependent_device *devices = NULL;
     struct vfio_pci_hot_reset *reset;
     int32_t *fds;
     int ret, i, count;
@@ -2905,36 +2947,16 @@ static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single)
     vfio_pci_pre_reset(vdev);
     vdev->vbasedev.needs_reset = false;
 
-    info = g_malloc0(sizeof(*info));
-    info->argsz = sizeof(*info);
-
-    ret = ioctl(vdev->vbasedev.fd, VFIO_DEVICE_GET_PCI_HOT_RESET_INFO, info);
-    if (ret && errno != ENOSPC) {
-        ret = -errno;
-        if (!vdev->has_pm_reset) {
-            error_report("vfio: Cannot reset device %04x:%02x:%02x.%x, "
-                         "no available reset mechanism.", vdev->host.domain,
-                         vdev->host.bus, vdev->host.slot, vdev->host.function);
-        }
+    ret = vfio_get_hot_reset_info(vdev, &info);
+    if (ret < 0) {
         goto out_single;
     }
 
-    count = info->count;
-    info = g_realloc(info, sizeof(*info) + (count * sizeof(*devices)));
-    info->argsz = sizeof(*info) + (count * sizeof(*devices));
-    devices = &info->devices[0];
-
-    ret = ioctl(vdev->vbasedev.fd, VFIO_DEVICE_GET_PCI_HOT_RESET_INFO, info);
-    if (ret) {
-        ret = -errno;
-        error_report("vfio: hot reset info failed: %m");
-        goto out_single;
-    }
-
+    devices = &info.devices[0];
     trace_vfio_pci_hot_reset_has_dep_devices(vdev->vbasedev.name);
 
     /* Verify that we have all the groups required */
-    for (i = 0; i < info->count; i++) {
+    for (i = 0; i < info.count; i++) {
         PCIHostDeviceAddress host;
         VFIOPCIDevice *tmp;
         VFIODevice *vbasedev_iter;
@@ -2994,7 +3016,7 @@ static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single)
     /* Determine how many group fds need to be passed */
     count = 0;
     QLIST_FOREACH(group, &vfio_group_list, next) {
-        for (i = 0; i < info->count; i++) {
+        for (i = 0; i < info.count; i++) {
             if (group->groupid == devices[i].group_id) {
                 count++;
                 break;
@@ -3008,7 +3030,7 @@ static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single)
 
     /* Fill in group fds */
     QLIST_FOREACH(group, &vfio_group_list, next) {
-        for (i = 0; i < info->count; i++) {
+        for (i = 0; i < info.count; i++) {
             if (group->groupid == devices[i].group_id) {
                 fds[reset->count++] = group->fd;
                 break;
@@ -3025,7 +3047,7 @@ static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single)
 
 out:
     /* Re-enable INTx on affected devices */
-    for (i = 0; i < info->count; i++) {
+    for (i = 0; i < info.count; i++) {
         PCIHostDeviceAddress host;
         VFIOPCIDevice *tmp;
         VFIODevice *vbasedev_iter;
@@ -3062,7 +3084,7 @@ out:
     }
 out_single:
     vfio_pci_post_reset(vdev);
-    g_free(info);
+    g_free(devices);
 
     return ret;
 }
