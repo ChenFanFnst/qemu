@@ -29,6 +29,8 @@ struct PCIBus {
        Keep a count of the number of devices with raised IRQs.  */
     int nirq;
     int *irq_count;
+
+    NotifierList reset_notifiers;
 };
 
 typedef struct PCIBridgeWindows PCIBridgeWindows;

@@ -267,6 +267,9 @@ void pci_bridge_write_config(PCIDevice *d,
 
     newctl = pci_get_word(d->config + PCI_BRIDGE_CONTROL);
     if (~oldctl & newctl & PCI_BRIDGE_CTL_BUS_RESET) {
+        /* do host secondary bus reset for passthrough devices */
+        notifier_list_notify(&s->sec_bus.reset_notifiers, NULL);
+
         /* Trigger hot reset on 0->1 transition. */
         qbus_reset_all(&s->sec_bus.qbus);
     }

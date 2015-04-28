@@ -74,11 +74,17 @@ static const VMStateDescription vmstate_pcibus = {
     }
 };
 
+void pci_bus_add_reset_notifier(PCIBus *bus, Notifier *notify)
+{
+    notifier_list_add(&bus->reset_notifiers, notify);
+}
+
 static void pci_bus_realize(BusState *qbus, Error **errp)
 {
     PCIBus *bus = PCI_BUS(qbus);
 
     vmstate_register(NULL, -1, &vmstate_pcibus, bus);
+    notifier_list_init(&bus->reset_notifiers);
 }
 
 static void pci_bus_unrealize(BusState *qbus, Error **errp)

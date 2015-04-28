@@ -7,6 +7,7 @@
 #include "exec/memory.h"
 #include "sysemu/dma.h"
 #include "qapi/error.h"
+#include "qemu/notify.h"
 
 /* PCI includes legacy ISA access.  */
 #include "hw/isa/isa.h"
@@ -370,6 +371,7 @@ void pci_bus_fire_intx_routing_notifier(PCIBus *bus);
 void pci_device_set_intx_routing_notifier(PCIDevice *dev,
                                           PCIINTxRoutingNotifier notifier);
 void pci_device_reset(PCIDevice *dev);
+void pci_bus_add_reset_notifier(PCIBus *bus, Notifier *notify);
 
 PCIDevice *pci_nic_init_nofail(NICInfo *nd, PCIBus *rootbus,
                                const char *default_model,
