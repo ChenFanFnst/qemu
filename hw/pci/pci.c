@@ -247,6 +247,24 @@ static void pci_do_device_reset(PCIDevice *dev)
     msix_reset(dev);
 }
 
+void pci_device_pre_reset(PCIBus *bus, PCIDevice *dev, void *unused)
+{
+    PCIDeviceClass *dc = PCI_DEVICE_GET_CLASS(dev);
+
+    if (dc->pre_reset) {
+        dc->pre_reset(dev);
+    }
+}
+
+void pci_device_post_reset(PCIBus *bus, PCIDevice *dev, void *unused)
+{
+    PCIDeviceClass *dc = PCI_DEVICE_GET_CLASS(dev);
+
+    if (dc->post_reset) {
+        dc->post_reset(dev);
+    }
+}
+
 /*
  * This function is called on #RST and FLR.
  * FLR if PCI_EXP_DEVCTL_BCR_FLR is set

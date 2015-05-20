@@ -40,6 +40,7 @@
 
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
 static void vfio_mmap_set_enabled(VFIOPCIDevice *vdev, bool enabled);
+static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single);
 
 /*
  * Disabling BAR mmaping can be slow, but toggling it around INTx can
@@ -1914,6 +1915,8 @@ static int vfio_check_host_bus_reset(VFIOPCIDevice *vdev)
     /* List all affected devices by bus reset */
     devices = &info->devices[0];
 
+    vdev->single_depend_dev = (info->count == 1);
+
     /* Verify that we have all the groups required */
     for (i = 0; i < info->count; i++) {
         PCIHostDeviceAddress host;
@@ -2055,10 +2058,26 @@ static int vfio_check_bus_reset(NotifierWithReturn *n, void *opaque)
     return vfio_check_host_bus_reset(vdev);
 }
 
+static void vfio_aer_pre_reset(PCIDevice *pdev)
+{
+    VFIOPCIDevice *vdev = DO_UPCAST(VFIOPCIDevice, pdev, pdev);
+
+    vdev->aer_reset = true;
+    vfio_pci_hot_reset(vdev, vdev->single_depend_dev);
+}
+
+static void vfio_aer_post_reset(PCIDevice *pdev)
+{
+    VFIOPCIDevice *vdev = DO_UPCAST(VFIOPCIDevice, pdev, pdev);
+
+    vdev->aer_reset = false;
+}
+
 static int vfio_setup_aer(VFIOPCIDevice *vdev, uint8_t cap_ver,
                           int pos, uint16_t size)
 {
     PCIDevice *pdev = &vdev->pdev;
+    PCIDeviceClass *dc = PCI_DEVICE_GET_CLASS(pdev);
     PCIDevice *dev_iter;
     uint8_t type;
     uint32_t errcap;
@@ -2104,6 +2123,9 @@ static int vfio_setup_aer(VFIOPCIDevice *vdev, uint8_t cap_ver,
 
     vdev->hotplug_notifier.notify = vfio_check_bus_reset;
     pci_bus_add_hotplug_notifier(pdev->bus, &vdev->hotplug_notifier);
+
+    dc->pre_reset = vfio_aer_pre_reset;
+    dc->post_reset = vfio_aer_post_reset;
 
     pcie_cap_deverr_init(pdev);
     return pcie_aer_init(pdev, pos, size);
@@ -3003,6 +3025,10 @@ static void vfio_pci_reset(DeviceState *dev)
     VFIOPCIDevice *vdev = DO_UPCAST(VFIOPCIDevice, pdev, pdev);
 
     trace_vfio_pci_reset(vdev->vbasedev.name);
+
+    if (vdev->aer_reset) {
+        return;
+    }
 
     vfio_pci_pre_reset(vdev);
 

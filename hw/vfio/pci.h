@@ -142,6 +142,8 @@ typedef struct VFIOPCIDevice {
     bool no_kvm_intx;
     bool no_kvm_msi;
     bool no_kvm_msix;
+    bool aer_reset;
+    bool single_depend_dev;
 
     NotifierWithReturn hotplug_notifier;
 } VFIOPCIDevice;

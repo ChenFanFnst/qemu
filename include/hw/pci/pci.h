@@ -105,6 +105,9 @@ typedef void PCIMapIORegionFunc(PCIDevice *pci_dev, int region_num,
                                 pcibus_t addr, pcibus_t size, int type);
 typedef void PCIUnregisterFunc(PCIDevice *pci_dev);
 
+typedef void PCIPreResetFunc(PCIDevice *pci_dev);
+typedef void PCIPostResetFunc(PCIDevice *pci_dev);
+
 typedef struct PCIIORegion {
     pcibus_t addr; /* current PCI mapping address. -1 means not mapped */
 #define PCI_BAR_UNMAPPED (~(pcibus_t)0)
@@ -193,6 +196,8 @@ typedef struct PCIDeviceClass {
     PCIUnregisterFunc *exit;
     PCIConfigReadFunc *config_read;
     PCIConfigWriteFunc *config_write;
+    PCIPreResetFunc *pre_reset;
+    PCIPostResetFunc *post_reset;
 
     uint16_t vendor_id;
     uint16_t device_id;
@@ -380,6 +385,8 @@ bool pci_intx_route_changed(PCIINTxRoute *old, PCIINTxRoute *new);
 void pci_bus_fire_intx_routing_notifier(PCIBus *bus);
 void pci_device_set_intx_routing_notifier(PCIDevice *dev,
                                           PCIINTxRoutingNotifier notifier);
+void pci_device_pre_reset(PCIBus *bus, PCIDevice *d, void *opaque);
+void pci_device_post_reset(PCIBus *bus, PCIDevice *d, void *opaque);
 void pci_device_reset(PCIDevice *dev);
 
 PCIDevice *pci_nic_init_nofail(NICInfo *nd, PCIBus *rootbus,

@@ -267,8 +267,17 @@ void pci_bridge_write_config(PCIDevice *d,
 
     newctl = pci_get_word(d->config + PCI_BRIDGE_CONTROL);
     if (~oldctl & newctl & PCI_BRIDGE_CTL_BUS_RESET) {
+        /*
+         * Notify all vfio-pci devices under the bus
+         * should do physical bus reset.
+         */
+        PCIBus *sec_bus = pci_bridge_get_sec_bus(s);
+        pci_for_each_device(sec_bus, pci_bus_num(sec_bus),
+                            pci_device_pre_reset, NULL);
         /* Trigger hot reset on 0->1 transition. */
         qbus_reset_all(&s->sec_bus.qbus);
+        pci_for_each_device(sec_bus, pci_bus_num(sec_bus),
+                            pci_device_post_reset, NULL);
     }
 }
 
