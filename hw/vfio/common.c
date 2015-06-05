@@ -793,8 +793,15 @@ VFIOGroup *vfio_get_group(int groupid, AddressSpace *as)
 
     QLIST_FOREACH(group, &vfio_group_list, next) {
         if (group->groupid == groupid) {
+            if (as && !group->container) {
+                if (vfio_connect_container(group, as)) {
+                    error_report("vfio: failed to setup container for group %d",
+                                 groupid);
+                    return NULL;
+                }
+            }
             /* Found it.  Now is it already in the right context? */
-            if (group->container->space->as == as) {
+            if (!as || group->container->space->as == as) {
                 return group;
             } else {
                 error_report("vfio: group %d used in multiple address spaces",
@@ -828,7 +835,7 @@ VFIOGroup *vfio_get_group(int groupid, AddressSpace *as)
     group->groupid = groupid;
     QLIST_INIT(&group->device_list);
 
-    if (vfio_connect_container(group, as)) {
+    if (as && vfio_connect_container(group, as)) {
         error_report("vfio: failed to setup container for group %d", groupid);
         goto close_fd_exit;
     }
@@ -854,12 +861,14 @@ free_group_exit:
 
 void vfio_put_group(VFIOGroup *group)
 {
-    if (!group || !QLIST_EMPTY(&group->device_list)) {
+    if (!group) {
         return;
     }
 
     vfio_kvm_device_del_group(group);
-    vfio_disconnect_container(group);
+    if (group->container) {
+        vfio_disconnect_container(group);
+    }
     QLIST_REMOVE(group, next);
     trace_vfio_put_group(group->fd);
     close(group->fd);
