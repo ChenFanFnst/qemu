@@ -2822,6 +2822,110 @@ static int vfio_add_std_cap(VFIOPCIDevice *vdev, uint8_t pos)
     return 0;
 }
 
+static bool vfio_pci_host_match(PCIHostDeviceAddress *host1,
+                                PCIHostDeviceAddress *host2)
+{
+    return (host1->domain == host2->domain && host1->bus == host2->bus &&
+            host1->slot == host2->slot && host1->function == host2->function);
+}
+
+static int vfio_put_affected_groups(VFIOPCIDevice *vdev)
+{
+    struct vfio_pci_hot_reset_info *info = NULL;
+    struct vfio_pci_dependent_device *devices;
+    PCIHostDeviceAddress host;
+    VFIOGroup *group;
+    int ret, i;
+
+    ret = vfio_get_hot_reset_info(vdev, &info);
+    if (ret) {
+        goto out;
+    }
+
+    /* List all affected devices by bus reset */
+    devices = &info->devices[0];
+
+    /* Verify that we have all the groups required */
+    for (i = 0; i < info->count; i++) {
+        host.domain = devices[i].segment;
+        host.bus = devices[i].bus;
+        host.slot = PCI_SLOT(devices[i].devfn);
+        host.function = PCI_FUNC(devices[i].devfn);
+
+        /* Skip the current device */
+        if (vfio_pci_host_match(&host, &vdev->host)) {
+            continue;
+        }
+
+        /* Ensure we own the group of the affected device */
+        QLIST_FOREACH(group, &vfio_group_list, next) {
+            if (group->groupid == devices[i].group_id) {
+                break;
+            }
+            if (QLIST_EMPTY(&group->device_list)) {
+
+            }
+        }
+
+
+    }
+
+}
+
+static int vfio_get_affected_groups(VFIOPCIDevice *vdev)
+{
+    struct vfio_pci_hot_reset_info *info = NULL;
+    struct vfio_pci_dependent_device *devices;
+    PCIHostDeviceAddress host;
+    VFIOGroup *group;
+    int ret, i;
+
+    ret = vfio_get_hot_reset_info(vdev, &info);
+    if (ret) {
+        goto out;
+    }
+
+    /* List all affected devices by bus reset */
+    devices = &info->devices[0];
+
+    /* Verify that we have all the groups required */
+    for (i = 0; i < info->count; i++) {
+        host.domain = devices[i].segment;
+        host.bus = devices[i].bus;
+        host.slot = PCI_SLOT(devices[i].devfn);
+        host.function = PCI_FUNC(devices[i].devfn);
+
+        /* Skip the current device */
+        if (vfio_pci_host_match(&host, &vdev->host)) {
+            continue;
+        }
+
+        /* Ensure we own the group of the affected device */
+        QLIST_FOREACH(group, &vfio_group_list, next) {
+            if (group->groupid == devices[i].group_id) {
+                break;
+            }
+        }
+
+        if (!group) {
+            /* Get all affected groups into VM */
+            group = vfio_get_group(devices[i].group_id, NULL);
+            if (!group) {
+                error_report("vfio: failed to get affected group %d",
+                             devices[i].group_id);
+                ret = -1;
+                goto out;
+            }
+        }
+    }
+
+    ret = 0;
+
+out:
+    g_free(info);
+    return ret;
+}
+
 static int vfio_setup_aer(VFIOPCIDevice *vdev, uint8_t cap_ver,
                           int pos, uint16_t size)
 {
@@ -2856,6 +2960,12 @@ static int vfio_setup_aer(VFIOPCIDevice *vdev, uint8_t cap_ver,
         }
 
         dev_iter = pci_bridge_get_device(dev_iter->bus);
+    }
+
+    /* Ensure own all affected groups */
+    ret = vfio_get_affected_groups(vdev);
+    if (ret) {
+        goto error;
     }
 
     errcap = vfio_pci_read_config(pdev, pdev->exp.aer_cap + PCI_ERR_CAP, 4);
@@ -3011,13 +3121,6 @@ static void vfio_pci_pre_reset(VFIOPCIDevice *vdev)
 static void vfio_pci_post_reset(VFIOPCIDevice *vdev)
 {
     vfio_enable_intx(vdev);
-}
-
-static bool vfio_pci_host_match(PCIHostDeviceAddress *host1,
-                                PCIHostDeviceAddress *host2)
-{
-    return (host1->domain == host2->domain && host1->bus == host2->bus &&
-            host1->slot == host2->slot && host1->function == host2->function);
 }
 
 static int vfio_pci_hot_reset(VFIOPCIDevice *vdev, bool single)
