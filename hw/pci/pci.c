@@ -81,6 +81,7 @@ static void pci_bus_realize(BusState *qbus, Error **errp)
     PCIBus *bus = PCI_BUS(qbus);
 
     vmstate_register(NULL, -1, &vmstate_pcibus, bus);
+    notifier_with_return_list_init(&bus->hotplug_notifiers);
 }
 
 static void pci_bus_unrealize(BusState *qbus, Error **errp)
@@ -1835,6 +1836,22 @@ PCIDevice *pci_find_device(PCIBus *bus, int bus_num, uint8_t devfn)
     return bus->devices[devfn];
 }
 
+void pci_bus_add_hotplug_notifier(PCIBus *bus, NotifierWithReturn *notify)
+{
+    notifier_with_return_list_add(&bus->hotplug_notifiers, notify);
+}
+
+void pci_bus_remove_hotplug_notifier(NotifierWithReturn *notifier)
+{
+    notifier_with_return_remove(notifier);
+}
+
+static int pci_bus_hotplug_notifier(PCIBus *bus, void *opaque)
+{
+    return notifier_with_return_list_notify(&bus->hotplug_notifiers,
+                                            opaque);
+}
+
 static void pci_qdev_realize(DeviceState *qdev, Error **errp)
 {
     PCIDevice *pci_dev = (PCIDevice *)qdev;
@@ -1874,6 +1891,18 @@ static void pci_qdev_realize(DeviceState *qdev, Error **errp)
     pci_add_option_rom(pci_dev, is_default_rom, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
+        pci_qdev_unrealize(DEVICE(pci_dev), NULL);
+        return;
+    }
+
+    /*
+     *  If the function is func 0, indicate the closure of the slot.
+     *  signal the callback.
+     */
+    if (DEVICE(pci_dev)->hotplugged &&
+        pci_get_function_0(pci_dev) == pci_dev &&
+        pci_bus_hotplug_notifier(bus, pci_dev)) {
+        error_setg(errp, "failed to hotplug function 0");
         pci_qdev_unrealize(DEVICE(pci_dev), NULL);
         return;
     }

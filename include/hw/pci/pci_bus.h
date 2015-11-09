@@ -39,7 +39,12 @@ struct PCIBus {
        Keep a count of the number of devices with raised IRQs.  */
     int nirq;
     int *irq_count;
+
+    NotifierWithReturnList hotplug_notifiers;
 };
+
+void pci_bus_add_hotplug_notifier(PCIBus *bus, NotifierWithReturn *notify);
+void pci_bus_remove_hotplug_notifier(NotifierWithReturn *notify);
 
 typedef struct PCIBridgeWindows PCIBridgeWindows;
 

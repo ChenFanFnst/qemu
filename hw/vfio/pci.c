@@ -2042,6 +2042,19 @@ static int vfio_check_devices_host_bus_reset(void)
     return 0;
 }
 
+static int vfio_check_bus_reset(NotifierWithReturn *n, void *opaque)
+{
+    VFIOPCIDevice *vdev = container_of(n, VFIOPCIDevice, hotplug_notifier);
+    PCIDevice *pci_dev = PCI_DEVICE(vdev);
+    PCIDevice *pci_func0 = opaque;
+
+    if (pci_get_function_0(pci_dev) != pci_func0) {
+        return 0;
+    }
+
+    return vfio_check_host_bus_reset(vdev);
+}
+
 static int vfio_setup_aer(VFIOPCIDevice *vdev, uint8_t cap_ver,
                           int pos, uint16_t size)
 {
@@ -2088,6 +2101,9 @@ static int vfio_setup_aer(VFIOPCIDevice *vdev, uint8_t cap_ver,
     } else {
         pdev->exp.aer_log.log_max = 0;
     }
+
+    vdev->hotplug_notifier.notify = vfio_check_bus_reset;
+    pci_bus_add_hotplug_notifier(pdev->bus, &vdev->hotplug_notifier);
 
     pcie_cap_deverr_init(pdev);
     return pcie_aer_init(pdev, pos, size);
@@ -2970,6 +2986,9 @@ static void vfio_exitfn(PCIDevice *pdev)
     vfio_unregister_req_notifier(vdev);
     vfio_unregister_err_notifier(vdev);
     pci_device_set_intx_routing_notifier(&vdev->pdev, NULL);
+    if (vdev->features & VFIO_FEATURE_ENABLE_AER) {
+        pci_bus_remove_hotplug_notifier(&vdev->hotplug_notifier);
+    }
     vfio_disable_interrupts(vdev);
     if (vdev->intx.mmap_timer) {
         timer_free(vdev->intx.mmap_timer);
