@@ -2658,6 +2658,9 @@ static void vfio_err_notifier_handler(void *opaque)
         msg.severity = isfatal ? PCI_ERR_ROOT_CMD_FATAL_EN :
                                  PCI_ERR_ROOT_CMD_NONFATAL_EN;
 
+        /* wait a bit to ensure aer device is ready */
+        usleep(2 * 1000);
+
         pcie_aer_msg(dev, &msg);
         return;
     }
